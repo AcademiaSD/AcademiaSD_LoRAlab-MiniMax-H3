@@ -104,7 +104,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | :--- | ---: | ---: | ---: | :--- |
 | 32 GB | 30.0 | 1.35 | 0.1 | Comfortable |
 | 24 GB | 22.0 | 1.35 | 0.1 | Comfortable |
-| **16 GB** | **14.0** | **1.35** | **0.1** | **Verified** |
+| **16 GB** | **13.6** | **1.35** | **0.1** | **Verified** |
 | 12 GB | 10.0 | 1.35 | 0.1 | Expected to work |
 | 10 GB | 8.0 | 1.35 | 0.1 | Expected to work |
 | 8 GB | 6.0 | 1.35 | 0.1 | At the measured floor |
