@@ -559,14 +559,20 @@ DEFAULTS = {
     "trim_text_padding": True,
 
     # --- Audio ------------------------------------------------------------------
-    # Con use_audio_loss=False el script manda igualmente 1 fila de audio ruidificada,
-    # con token_tag=2 y position_ids=(0,0,0) — que colisiona con el primer token de
-    # texto. Esa fila participa en la atencion de los 50 bloques. Ponlo a true para
-    # eliminarla del todo (el forward soporta indices vacios).
-    # With use_audio_loss=False the script still sends 1 noised audio row, tagged 2 and
-    # placed at position (0,0,0) — colliding with the first text token. That row takes
-    # part in attention across all 50 blocks. Set true to drop it entirely (the forward
-    # supports empty indices).
+    # Solo afecta al ENTRENAMIENTO. Con use_audio_loss=False la fila de audio no
+    # recibe gradiente, asi que mandarla solo cuesta atencion en los 50 bloques;
+    # a true se elimina del todo (el forward soporta indices vacios).
+    #
+    # OJO: la PREVIEW no usa este ajuste y manda SIEMPRE las filas de audio. Son
+    # dos situaciones distintas: entrenando se parte de un latente real y sobra
+    # una fila muda, pero muestreando desde ruido puro el modelo tiene que ver el
+    # layout completo con el que se entreno, que siempre lleva audio. Es lo que
+    # hace tambien la implementacion de referencia.
+    #
+    # Training only. With use_audio_loss=False the audio row gets no gradient, so
+    # sending it only costs attention across the 50 blocks. The PREVIEW ignores
+    # this flag and always sends audio rows: sampling from pure noise has to show
+    # the model the full layout it was trained on.
     "drop_audio_rows_when_unused": True,
 }
 
@@ -3300,11 +3306,17 @@ def build_minimax_packed_indices(
     patch_h,
     patch_w,
     device,
+    audio_channels=2,
 ):
+    """audio_channels: el audio se empaqueta channel-major (estereo = 2), asi que
+    A filas son a_lat = A // audio_channels latentes por canal. Solo se usa para
+    colocar las posiciones del audio.
+    audio_channels: audio rows are channel-major (stereo = 2)."""
     T = int(text_len)
     V = int(video_len)
     A = int(audio_len)
     S = T + V + A
+    width_axis = None
 
     idx_dtype = torch.long
     pos_dtype = torch.float32   # posiciones continuas, no índices — ver nota arriba
@@ -3314,21 +3326,35 @@ def build_minimax_packed_indices(
     else:
         text_indices = torch.empty(0, device=device, dtype=idx_dtype)
 
-    if V > 0:
-        video_indices = torch.arange(T, T + V, device=device, dtype=idx_dtype)
-    else:
-        video_indices = torch.empty(0, device=device, dtype=idx_dtype)
-
+    # ------------------------------------------------------------------
+    # ORDEN DEL LAYOUT: [texto | audio | video].
+    #
+    # Es el orden oficial (MiniMaxH3PrepareLayoutStep de diffusers y el
+    # pipeline de ai-toolkit): el audio va ENTRE el texto y el video, no
+    # detras. Antes estaba como [texto | video | audio].
+    #
+    # Con A == 0 los dos ordenes son identicos, asi que este cambio NO altera
+    # el entrenamiento (que envia cero filas de audio); solo importa para la
+    # preview, que ahora si las manda.
+    #
+    # LAYOUT ORDER: [text | audio | video], the official one. With A == 0 both
+    # orders are identical, so this does not change training.
+    # ------------------------------------------------------------------
     if A > 0:
-        audio_indices = torch.arange(T + V, S, device=device, dtype=idx_dtype)
+        audio_indices = torch.arange(T, T + A, device=device, dtype=idx_dtype)
     else:
         audio_indices = torch.empty(0, device=device, dtype=idx_dtype)
 
-    text_tags = torch.ones(T, dtype=idx_dtype, device=device)
-    video_tags = torch.zeros(V, dtype=idx_dtype, device=device)
-    audio_tags = torch.full((A,), 2, dtype=idx_dtype, device=device)
+    if V > 0:
+        video_indices = torch.arange(T + A, S, device=device, dtype=idx_dtype)
+    else:
+        video_indices = torch.empty(0, device=device, dtype=idx_dtype)
 
-    token_tags = torch.cat([text_tags, video_tags, audio_tags], dim=0).contiguous()
+    text_tags = torch.ones(T, dtype=idx_dtype, device=device)
+    audio_tags = torch.full((A,), 2, dtype=idx_dtype, device=device)
+    video_tags = torch.zeros(V, dtype=idx_dtype, device=device)
+
+    token_tags = torch.cat([text_tags, audio_tags, video_tags], dim=0).contiguous()
     timestep_indices = torch.zeros(S, dtype=idx_dtype, device=device)
 
     # texto: eje t = 0..T-1 (cada token en su propia posición), h=w=0
@@ -3351,6 +3377,9 @@ def build_minimax_packed_indices(
             # rejilla espacial normalizada por área (una por frame, se reutiliza para
             # cada uno) + eje t continuando desde el origen text_len
             frame = _frame_grid(H, W, ph, pw, device)             # [Hp*Wp, 2]
+            # El eje de anchura suelto: el audio se clava en sus dos extremos.
+            # The bare width axis: audio rows pin to its two extremes.
+            width_axis = _axis_from_sqrt_area(W, pw, math.sqrt(H * W), device)
             frame_rows = frame.shape[0]
             t_grid = _video_t_grid(Fp, T, device)                  # [Fp]
             video_pos = torch.empty(V, 3, dtype=torch.float64, device=device)
@@ -3364,16 +3393,37 @@ def build_minimax_packed_indices(
         video_pos = torch.zeros(0, 3, dtype=torch.float64, device=device)
 
     if A > 0:
-        # Convención de audio no verificada contra el modelo oficial (no cubierta por
-        # el port de referencia); se deja el esquema simple anterior. USE_AUDIO_LOSS
-        # está OFF por defecto y el entrenamiento de imagen no depende de esto.
-        aa = torch.arange(A, dtype=torch.float64, device=device)
-        zz = torch.zeros_like(aa)
-        audio_pos = torch.stack([aa, zz, zz], dim=-1).reshape(A, 3)
+        # ------------------------------------------------------------------
+        # POSICIONES DEL AUDIO, ahora las OFICIALES.
+        #
+        # Copiadas de MiniMaxH3PrepareLayoutStep.build_packed_sequence:
+        #   - eje t: text_len + arange(a_lat), REPETIDO para cada canal
+        #     (las filas son channel-major: todo el canal 0, luego el 1), o sea
+        #     que el audio comparte el reloj rotatorio del video;
+        #   - eje h: 0, el audio no tiene coordenada de altura;
+        #   - eje w: las filas se clavan en los DOS EXTREMOS de la rejilla de
+        #     anchura del video: el primer canal en width_grid[0] y el resto en
+        #     width_grid[-1].
+        # El esquema anterior (t = 0..A-1, h = w = 0) no se parecia a esto y
+        # ademas hacia que la primera fila de audio cayera en (0,0,0), justo
+        # encima del primer token de texto.
+        #
+        # OFFICIAL audio positions, copied from diffusers'
+        # build_packed_sequence: the audio shares the video's rotary clock and
+        # its rows are pinned to the two extremes of the width grid.
+        # ------------------------------------------------------------------
+        a_lat = max(1, A // max(1, int(audio_channels)))
+        audio_pos = torch.zeros(A, 3, dtype=torch.float64, device=device)
+        a_time = float(T) + torch.arange(a_lat, dtype=torch.float64, device=device)
+        reps = (A + a_lat - 1) // a_lat
+        audio_pos[:, 0] = a_time.repeat(reps)[:A]
+        if V > 0 and width_axis is not None and width_axis.numel() > 0:
+            audio_pos[:a_lat, 2] = float(width_axis[0])
+            audio_pos[a_lat:, 2] = float(width_axis[-1])
     else:
         audio_pos = torch.zeros(0, 3, dtype=torch.float64, device=device)
 
-    position_ids = torch.cat([text_pos, video_pos, audio_pos], dim=0).contiguous().to(pos_dtype)
+    position_ids = torch.cat([text_pos, audio_pos, video_pos], dim=0).contiguous().to(pos_dtype)
 
     return (
         timestep_indices,
@@ -5571,17 +5621,74 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
         # drop_audio_rows_when_unused: solo importa que la ultima dimension
         # coincida con audio_proj_in.in_features.
         # Zero audio rows, exactly as training does; only the last dim matters.
-        audio = torch.zeros((1, 0, int(audio_channels)), device="cuda", dtype=torch.bfloat16)
+        # ----------------------------------------------------------------
+        # FILAS DE AUDIO: SI van, tambien para una imagen suelta.
+        #
+        # El entrenamiento las quita (drop_audio_rows_when_unused) porque ahi
+        # solo son una perturbacion sin gradiente. Pero al MUESTREAR desde ruido
+        # puro el modelo tiene que ver el layout con el que se entreno, y ese
+        # layout SIEMPRE lleva audio. Verificado en el pipeline de ai-toolkit:
+        # `a_lat` se calcula sin condicion, tambien con num_frames == 1, y su
+        # flag `with_audio` solo decide si al final se DECODIFICA la forma de
+        # onda, no si las filas estan en la secuencia.
+        #
+        # Para un frame: a_lat = round(1 / 24 fps * 40 latentes/s) = 2, por 2
+        # canales = 4 filas. Son 4 de ~620, pero atraviesan los 50 bloques.
+        #
+        # AUDIO ROWS ARE INCLUDED, even for a still image. Training drops them
+        # (they carry no gradient there), but sampling from pure noise has to
+        # show the model the layout it was trained on, and that layout always
+        # carries audio. Verified against ai-toolkit's pipeline, where `a_lat`
+        # is computed unconditionally and `with_audio` only controls whether the
+        # waveform is decoded at the end.
+        # ----------------------------------------------------------------
+        _AUDIO_LATENTS_PER_SECOND = 40.0
+        a_lat = max(1, int(round(1.0 / float(FRAME_RATE) * _AUDIO_LATENTS_PER_SECOND)))
+        a_rows = a_lat * int(audio_channels)
+        audio = torch.randn((1, a_rows, 32), generator=gen, device="cuda",
+                            dtype=torch.float32)
 
         (timestep_indices, token_tags, position_ids,
          video_indices, audio_indices, text_indices) = build_minimax_packed_indices(
-            B=1, text_len=text.shape[1], video_len=tokens.shape[1], audio_len=0,
+            B=1, text_len=text.shape[1], video_len=tokens.shape[1], audio_len=a_rows,
             video_latent_shape=latent_shape,
             patch_t=patch_t, patch_h=patch_h, patch_w=patch_w, device="cuda",
+            audio_channels=int(audio_channels),
         )
+
+        # ----------------------------------------------------------------
+        # DOS TIMESTEPS EN EL MISMO FORWARD.
+        #
+        # El video y el audio recorren schedules DISTINTOS: shift del video (el
+        # que elija el usuario) y shift 3.0 el audio, acoplados por el remap de
+        # sigma para que ambos esten en la misma posicion del schedule. El
+        # forward de H3 admite varios timestep a la vez: `timestep` lleva los
+        # valores distintos y `timestep_indices` dice cual usa cada fila.
+        # Texto y video -> 0, audio -> 1.
+        #
+        # TWO TIMESTEPS IN ONE FORWARD: video and audio run different sigma
+        # schedules, coupled by the closed-form shift remap. H3's forward takes
+        # the distinct values in `timestep` and the per-row index in
+        # `timestep_indices`.
+        # ----------------------------------------------------------------
+        timestep_indices = timestep_indices.clone()
+        timestep_indices[audio_indices] = 1
 
         scheduler = MiniMaxH3Scheduler(shift=float(PREVIEW_SHIFT))
         scheduler.set_timesteps(int(PREVIEW_STEPS) + 1, device="cuda")
+
+        def _remap_sigma(sigma, from_shift, to_shift):
+            """Sigma del schedule `from_shift` -> el equivalente en `to_shift`,
+            en la misma posicion subyacente. Es el acoplamiento video/audio que
+            usa la implementacion de referencia.
+            Maps a sigma from one shift schedule onto another at the same
+            underlying position: the reference video/audio coupling."""
+            base = sigma / (from_shift + sigma * (1.0 - from_shift))
+            return to_shift * base / (1.0 + (to_shift - 1.0) * base)
+
+        _AUDIO_SIGMA_SHIFT = 3.0
+        sigmas_v = scheduler.sigmas
+        sigmas_a = _remap_sigma(sigmas_v, float(PREVIEW_SHIFT), _AUDIO_SIGMA_SHIFT)
 
         neg_text = None
         if PREVIEW_CFG > 1.0:
@@ -5613,12 +5720,14 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
         # The PEFT-wrapped transformer rejects kwargs its real forward lacks.
         transformer_forward = model.forward
 
-        def _forward(hidden, text_cond, t_value):
+        def _forward(hidden, audio_hidden, text_cond, t_pair):
             kwargs = {
                 "hidden_states": hidden.to(torch.bfloat16),
-                "audio_hidden_states": audio,
+                "audio_hidden_states": audio_hidden.to(torch.bfloat16),
                 "encoder_hidden_states": text_cond,
-                "timestep": t_value,
+                # Los DOS timesteps distintos: indice 0 = video/texto, 1 = audio.
+                # Both distinct timesteps: index 0 = video/text, 1 = audio.
+                "timestep": t_pair,
                 "timestep_indices": timestep_indices,
                 "token_tags": token_tags,
                 "position_ids": position_ids,
@@ -5628,16 +5737,37 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
                 "return_dict": False,
             }
             out = model(**filter_forward_kwargs(kwargs, transformer_forward))
-            return (out[0] if isinstance(out, (tuple, list)) else out.sample).float()
+            if isinstance(out, (tuple, list)):
+                return out[0].float(), (out[1].float() if len(out) > 1 else None)
+            return out.sample.float(), getattr(out, "audio_sample", None)
 
         with torch.no_grad():
-            for t in scheduler.timesteps:
-                t_value = t.reshape(1).to(device="cuda", dtype=torch.bfloat16)
-                pred = _forward(tokens, text, t_value)
+            for i, t in enumerate(scheduler.timesteps):
+                sv, sv_next = float(sigmas_v[i]), float(sigmas_v[i + 1])
+                sa, sa_next = float(sigmas_a[i]), float(sigmas_a[i + 1])
+                t_pair = torch.tensor([1.0 - sv, 1.0 - sa],
+                                      device="cuda", dtype=torch.bfloat16)
+
+                pred, pred_audio = _forward(tokens, audio, text, t_pair)
                 if neg_text is not None:
-                    pred_u = _forward(tokens, neg_text, t_value)
+                    pred_u, _ = _forward(tokens, audio, neg_text, t_pair)
                     pred = pred_u + float(PREVIEW_CFG) * (pred - pred_u)
+
+                # Video: por el scheduler de diffusers, que ya esta probado.
+                # Video through the diffusers scheduler, which is tested.
                 tokens = scheduler.step(pred, t, tokens, return_dict=False)[0]
+
+                # Audio: Euler manual sobre SU rejilla de sigma, igual que la
+                # implementacion de referencia. El audio no se decodifica nunca
+                # aqui; se denoisa solo para que la secuencia siga siendo la que
+                # el modelo espera en cada paso.
+                # Audio: manual Euler on ITS own sigma grid, as the reference
+                # does. The audio is never decoded here; it is denoised only so
+                # the sequence stays the one the model expects at every step.
+                if pred_audio is not None and pred_audio.shape[1] == audio.shape[1] and sa > 0:
+                    denoised_a = audio.float() + sa * pred_audio
+                    ratio_a = sa_next / sa
+                    audio = (ratio_a * audio.float() + (1.0 - ratio_a) * denoised_a)
 
         latent_out = unpack_video_latent(tokens, latent_shape, patch_h, patch_w, patch_t)
 
