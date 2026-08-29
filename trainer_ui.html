@@ -467,7 +467,24 @@
                             <label>VRAM HEADROOM:</label>
                             <input type="number" step="0.1" id="train_vram_headroom_gb" value="0.1" oninput="markVramProfileCustom()">
                         </div>
-                        <div class="form-group">
+                        <!-- DEBUG ON/OFF - OCULTO DE LA INTERFAZ CON display:none;
+                             Se oculta para la beta publica: el modo debug llena la
+                             consola de auditorias internas que no significan nada para
+                             quien solo quiere entrenar un LoRA, y ya invita a que se
+                             abran incidencias por mensajes que son normales.
+                             NO se borra: el <select> sigue en el DOM con value="false",
+                             asi que saveTrainSettings() sigue escribiendo
+                             debug_training: false en el JSON y el entrenador lo lee
+                             igual. Para recuperarlo basta con quitar el display:none.
+                             Tambien se puede activar a mano poniendo
+                             "debug_training": true en train_settings.json, sin tocar
+                             la interfaz. / Hidden for the public beta: debug mode fills
+                             the console with internal audits that mean nothing to
+                             someone who just wants to train a LoRA. NOT removed: the
+                             select stays in the DOM with value="false", so the saved
+                             JSON is unchanged. Remove the display:none to bring it
+                             back, or set "debug_training": true in the JSON by hand. -->
+                        <div class="form-group" style="display: none;">
                             <label>DEBUG ON/OFF:</label>
                             <select id="train_debug_training">
                                 <option value="false" selected>OFF</option>
