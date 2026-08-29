@@ -369,12 +369,34 @@ DEFAULTS = {
     # Si te falta, baja a 13.0 antes de tocar el rank.
     # rank 16 + fp32 LoRA + fp32 Adam state costs ~1.5 GB more than rank 8 in bf16.
     "vram_budget_gb": 14.0,
-    # Debe cubrir 1 bloque NF4 (~0,33 GB) MAS el peso bf16 que bitsandbytes
-    # materializa entero para cada matmul: el traceback muestra que bnb cae en
-    # `_dequant_linear_fallback` (nada de kernel fusionado) y pide 294 MB de golpe
-    # para el proj del FF. 1,5 GB sobra; 2,5 es holgado.
-    # bnb falls back to _dequant_linear_fallback: it materializes the FULL bf16
-    # weight for every matmul (294 MB for the FF proj in your traceback).
+    # MINIMO REAL: 1.34. Medido, no estimado.
+    #
+    # El tope no lo pone la tarjeta, lo pone el guard _enforce_manual_swap_budget,
+    # que exige `_nf4_swap_required_bytes = get_block_nf4_bytes * 4`. Un bloque
+    # NF4 de este modelo mide EXACTAMENTE 333.204.880 bytes (0,333205 GB), asi
+    # que el guard pide 4 x 0,333205 = 1,3328 GB. Con 1.33 lanza RuntimeError;
+    # con 1.34 pasa. Comprobado a mano: 1.34 es el valor mas bajo que arranca.
+    #
+    # De donde sale el 4x: hay que cubrir el bloque residente MAS el peso bf16
+    # que bitsandbytes materializa entero en cada matmul, porque cae en
+    # `_dequant_linear_fallback` en vez de usar un kernel fusionado. El peor
+    # tensor del bloque NO es el proj del FF (294 MiB, el del traceback) sino
+    # adaln_proj.linear [96768, 2688], que son 496 MiB. Pico real por bloque:
+    # 0,333 residente + 0,520 del dequant = 0,853 GB. El resto del margen hasta
+    # 1,333 absorbe la fragmentacion del allocator, que con el swap es real.
+    #
+    # No bajar de 1.34 sin cambiar tambien el factor 4 de
+    # _nf4_swap_required_bytes, y sin medirlo: entre 0,853 y 1,333 es terreno
+    # sin explorar, y equivocarse ahi es un OOM a mitad de una corrida de horas.
+    #
+    # REAL MINIMUM: 1.34, measured. The limit is the _enforce_manual_swap_budget
+    # guard, not the card: it requires block_nf4_bytes * 4, and one NF4 block is
+    # exactly 333,204,880 bytes, so the guard asks for 1.3328 GB. 1.33 raises,
+    # 1.34 passes. The 4x covers the resident block plus the full bf16 weight
+    # bitsandbytes materializes per matmul; the worst tensor is adaln_proj.linear
+    # at 496 MiB, not the FF proj at 294 MiB. Real peak 0.853 GB; the rest is
+    # allocator-fragmentation margin. Do not go below 1.34 without also changing
+    # the factor, and without measuring.
     "vram_swap_gb": 1.35,
     # El headroom tiene que cubrir TODO lo que no son pesos residentes: activaciones,
     # el grafo de autograd, los gradientes, el estado de AdamW, los pesos bf16 que
@@ -690,6 +712,13 @@ def log_print(*args, **kwargs):
         "TOTAL TRAINING TIME",
         "[LIVE]",
         "[PREVIEW]",
+        # El plan de VRAM es lo unico que dice cuantos bloques quedan residentes
+        # y cuanto ocupa la base fuera de bloques. Sin el no hay forma de ajustar
+        # vram_budget_gb con criterio, y estaba oculto con debug_training=False.
+        # The VRAM plan is the only thing that reports how many blocks stay
+        # resident and how big the non-block base is; without it vram_budget_gb
+        # cannot be tuned. It was hidden with debug_training=False.
+        "[VRAM-PLAN]",
         # El resumen del dataset son 3-4 lineas una sola vez por corrida y es
         # justo lo que hay que tener delante al decidir el siguiente experimento.
         # Ya no lleva [WARN] porque no es un aviso: es informacion.
@@ -4243,15 +4272,32 @@ def _enforce_manual_swap_budget(module):
     allowed = VRAM_SWAP_MAX_BYTES
 
     if required > allowed:
+        # ----------------------------------------------------------------
+        # CUATRO DECIMALES, NO DOS.
+        #
+        # Con dos decimales este mensaje decia "block=1.33 GB | swap
+        # allowed=1.33 GB" y fallaba igual: la comparacion real es
+        # 1,3328 > 1,3300, pero el redondeo la ocultaba y no habia forma de
+        # entender por que. Con cuatro decimales la diferencia se ve, y ademas
+        # se dice directamente cual es el minimo que si funciona.
+        # FOUR DECIMALS: with two, this printed "block=1.33 | swap allowed=1.33"
+        # and still failed, hiding the actual 1.3328 > 1.3300 comparison.
+        # ----------------------------------------------------------------
+        needed_gb = required / 1e9
+        minimum_gb = math.ceil(needed_gb * 100.0) / 100.0
         raise RuntimeError(
             "[ERROR] The NF4 block needs more memory than vram_swap_gb allows. "
-            "block={:.2f} GB | swap allowed={:.2f} GB | resident budget={:.2f} GB | "
-            "headroom={:.2f} GB. Raise vram_swap_gb or reduce the block size. / "
-            "[ERROR] El bloque NF4 necesita mas memoria de la que permite vram_swap_gb. "
-            "bloque={:.2f} GB | swap permitido={:.2f} GB | budget residente={:.2f} GB | "
-            "headroom={:.2f} GB. Sube vram_swap_gb o reduce el tamano del bloque.".format(
-                required / 1e9, VRAM_SWAP_GB, VRAM_BUDGET_GB, VRAM_HEADROOM_GB,
-                required / 1e9, VRAM_SWAP_GB, VRAM_BUDGET_GB, VRAM_HEADROOM_GB,
+            "block needs {:.4f} GB | vram_swap_gb allows {:.4f} GB | short by "
+            "{:.4f} GB. Set vram_swap_gb to at least {:.2f}. "
+            "(resident budget {:.2f} GB | headroom {:.2f} GB) / "
+            "[ERROR] El bloque NF4 necesita mas memoria de la que permite "
+            "vram_swap_gb. El bloque necesita {:.4f} GB | vram_swap_gb permite "
+            "{:.4f} GB | faltan {:.4f} GB. Pon vram_swap_gb en {:.2f} como "
+            "minimo. (budget residente {:.2f} GB | headroom {:.2f} GB)".format(
+                needed_gb, allowed / 1e9, needed_gb - allowed / 1e9, minimum_gb,
+                VRAM_BUDGET_GB, VRAM_HEADROOM_GB,
+                needed_gb, allowed / 1e9, needed_gb - allowed / 1e9, minimum_gb,
+                VRAM_BUDGET_GB, VRAM_HEADROOM_GB,
             )
         )
 
@@ -4594,11 +4640,26 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
             flush=True,
         )
 
-    configured_total = (float(target_vram_gb) + float(swap_gb) + float(headroom_gb)
-                        + float(VRAM_TRAINING_OVERHEAD_GB))
+    # ------------------------------------------------------------------
+    # EL OVERHEAD NO SE SUMA AQUI: YA ESTA DENTRO DEL BUDGET.
+    #
+    # Unas lineas mas arriba se hace max_base_alloc = target_vram_gb - overhead,
+    # o sea que vram_budget_gb es "pesos + overhead de entrenamiento". Sumarlo
+    # otra vez lo contaba DOS veces: con budget 14,25 / swap 1,34 / headroom 0,10
+    # daba 18,19 GB en vez de 15,69 y disparaba un aviso falso de "supera la VRAM
+    # fisica" en cualquier tarjeta de 16 GB, precisamente en la configuracion que
+    # si funciona.
+    #
+    # The overhead is NOT added here: it is already inside the budget, since
+    # max_base_alloc = target_vram_gb - overhead a few lines above. Adding it
+    # again counted it twice and raised a false "exceeds physical VRAM" warning
+    # on the very configuration that works.
+    # ------------------------------------------------------------------
+    configured_total = float(target_vram_gb) + float(swap_gb) + float(headroom_gb)
     if total_physical_gb is not None and configured_total > total_physical_gb:
         log_print(
-            "[VRAM-PLAN] AVISO: presupuesto manual {:.2f} GB supera la VRAM física {:.2f} GB.".format(
+            "[VRAM-PLAN] AVISO / WARNING: presupuesto manual {:.4f} GB supera la VRAM "
+            "fisica {:.4f} GB. / manual budget exceeds physical VRAM.".format(
                 configured_total, total_physical_gb
             ),
             flush=True,
@@ -4627,14 +4688,30 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
             )
             max_base_alloc = physical_ceiling
 
+    # Cuatro decimales en base_alloc y en el residente maximo: son las dos cifras
+    # con las que se calibra vram_budget_gb, y a dos decimales la incertidumbre
+    # (+-0,005 GB) basta para mover un escalon entero de bloque, que son 0,3332.
+    # Four decimals on base_alloc and the effective resident max: these are the
+    # two figures vram_budget_gb is calibrated against, and at two decimals the
+    # +-0.005 GB rounding is enough to shift a whole 0.3332 GB block step.
     log_print(
-        "[VRAM-PLAN] Base fuera de bloques: {:.2f} GB | Residente MAX (efectivo): {:.2f} GB | "
-        "Swap MAX: {:.2f} GB | Headroom: {:.2f} GB | TOTAL MAX: {:.2f} GB".format(
+        "[VRAM-PLAN] Base fuera de bloques / non-block base: {:.4f} GB | Residente MAX "
+        "(efectivo) / effective resident max: {:.4f} GB | Swap MAX: {:.4f} GB | "
+        "Headroom: {:.4f} GB | TOTAL MAX: {:.4f} GB".format(
             base_alloc / 1e9,
             max_base_alloc / 1e9,
             float(swap_gb),
             float(headroom_gb),
             configured_total,
+        ),
+        flush=True,
+    )
+    log_print(
+        "[VRAM-PLAN] Bloque residente / resident block: {:.6f} GB | para N bloques hace "
+        "falta vram_budget_gb >= base + N*bloque + overhead / for N blocks you need "
+        "vram_budget_gb >= base + N*block + overhead ({:.4f} GB)".format(
+            (get_block_nontrainable_bytes(block_list[0]) / 1e9) if n_blocks else 0.0,
+            float(VRAM_TRAINING_OVERHEAD_GB),
         ),
         flush=True,
     )
