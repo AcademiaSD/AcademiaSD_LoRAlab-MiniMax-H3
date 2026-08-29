@@ -261,20 +261,20 @@
                             <label>Multiple / Múltiplo:</label>
                             <select id="precache_multiple">
                                 <option value="8">8</option>
-                                <option value="16" selected>16</option>
-                                <option value="32">32</option>
+                                <option value="16">16</option>
+                                <option value="32" selected>32</option>
                                 <option value="64">64</option>
                             </select>
                         </div>
                         <div class="form-group">
                             <label>Max Side / Lado Máx:</label>
-                            <input type="number" id="precache_max_side" value="1280">
+                            <input type="number" id="precache_max_side" value="1024">
                         </div>
                     </div>
 
                     <div class="form-group">
                         <label>Max Seq Len / Long. Sec.:</label>
-                        <input type="number" id="precache_max_seq_len" value="128">
+                        <input type="number" id="precache_max_seq_len" value="192">
                     </div>
 
                     <!-- Botones Load JSON y Save JSON -->
@@ -315,22 +315,22 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label>Total Steps / Pasos Totales:</label>
-                            <input type="number" id="train_total_steps" value="800">
+                            <input type="number" id="train_total_steps" value="500">
                         </div>
                         <div class="form-group">
                             <label>Learning Rate / LR:</label>
-                            <input type="text" id="train_lr" value="0.0001">
+                            <input type="text" id="train_lr" value="0.0002">
                         </div>
                     </div>
 
                     <div class="form-row">
                         <div class="form-group">
                             <label>LoRA Rank (R):</label>
-                            <input type="number" id="train_lora_rank" value="32">
+                            <input type="number" id="train_lora_rank" value="16">
                         </div>
                         <div class="form-group">
                             <label>LoRA Alpha (A):</label>
-                            <input type="number" id="train_lora_alpha" value="32">
+                            <input type="number" id="train_lora_alpha" value="16">
                         </div>
                     </div>
 
@@ -341,7 +341,7 @@
                         </div>
                         <div class="form-group">
                             <label>Grad Accum Steps:</label>
-                            <input type="number" id="train_grad_accum" value="4">
+                            <input type="number" id="train_grad_accum" value="1">
                         </div>
                     </div>
 
@@ -385,35 +385,53 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label>Preview Steps / Pasos Preview:</label>
-                            <input type="number" id="train_preview_steps" value="12" title="Pasos del sampler. MiniMax-H3 no esta destilado en pasos: por debajo de 10 sale sin definir, 12-20 es el rango util. / Sampler steps; the model is not step-distilled, 12-20 is the useful range.">
+                            <input type="number" id="train_preview_steps" value="20" title="Pasos del sampler. MiniMax-H3 no esta destilado en pasos: por debajo de 10 sale sin definir, 12-30 es el rango util. / Sampler steps; the model is not step-distilled, 12-30 is the useful range.">
                         </div>
-                        <div class="form-group">
-                            <label>Preview CFG / CFG Preview:</label>
-                            <input type="number" step="0.1" id="train_preview_cfg" value="1.0" title="El checkpoint es guidance-distilled y la receta oficial NO usa CFG. 1.0 o menos lo desactiva (recomendado). Por encima de 1 duplica el coste de cada preview. / The checkpoint is guidance-distilled; <= 1.0 disables CFG (recommended). Above 1 doubles the cost.">
-                        </div>
-                    </div>
-
-                    <div class="form-row">
                         <div class="form-group">
                             <label>Preview Seed (-1 = usa Seed):</label>
                             <input type="number" id="train_preview_seed" value="-1" title="Fijar la semilla hace que todas las previews partan del MISMO ruido, que es lo que permite comparar un paso con otro. / A fixed seed makes every preview start from the same noise, which is what makes them comparable.">
                         </div>
-                        <div class="form-group">
-                            <label>VAE Device / Dispositivo:</label>
-                            <select id="train_preview_vae_device" title="El decoder del VAE son 4,8 GB en bf16: en una tarjeta de 16 GB NO cabe junto al DiT. En CPU tarda 1-2 min y no toca la VRAM. / The VAE decoder needs 4.8 GB in bf16 and does not fit next to the DiT on a 16 GB card. CPU takes 1-2 min and touches no VRAM.">
-                                <option value="cpu" selected>CPU (seguro / safe, ~1-2 min)</option>
-                                <option value="cuda">CUDA (rápido / fast, +4,8 GB VRAM)</option>
-                            </select>
-                        </div>
+                    </div>
+
+                    <!-- PREVIEW CFG - OCULTO DE LA INTERFAZ CON display:none;
+                         MiniMax-H3 es un checkpoint GUIDANCE-DISTILLED: no tiene rama
+                         incondicional y su muestreo oficial es UN solo forward por paso,
+                         sin CFG. Lo dicen tanto diffusers ("there is no negative prompt
+                         and no unconditional branch") como el pipeline de ai-toolkit,
+                         que acepta guidance_scale y lo IGNORA explicitamente.
+                         A diferencia de Krea2 y LTX 2.3, aqui subir el CFG no mejora
+                         nada: extrapola en una direccion que el modelo destilado no fue
+                         entrenado para producir, y ademas duplica el coste de cada
+                         preview. Se oculta para no invitar a tocarlo.
+                         NO se borra: el input sigue en el DOM con value="1.0", asi que
+                         saveTrainSettings() sigue escribiendo preview_cfg: 1 y el
+                         entrenador lo lee igual. Si algun dia sale un checkpoint de H3
+                         sin destilar, basta con quitar el display:none.
+                         / MiniMax-H3 is guidance-distilled: no unconditional branch, one
+                         forward per step, no CFG. Both diffusers and ai-toolkit say so,
+                         and ai-toolkit explicitly ignores guidance_scale. Unlike Krea2
+                         and LTX 2.3, raising CFG here only degrades the image and
+                         doubles the cost. Hidden, not removed. -->
+                    <div class="form-group" style="display: none;">
+                        <label>Preview CFG / CFG Preview:</label>
+                        <input type="number" step="0.1" id="train_preview_cfg" value="1.0">
+                    </div>
+
+                    <div class="form-group">
+                        <label>VAE Device / Dispositivo VAE:</label>
+                        <select id="train_preview_vae_device" title="El decoder del VAE son 4,8 GB en bf16: en una tarjeta de 16 GB NO cabe junto al DiT. En CPU tarda 1-2 min y no toca la VRAM. / The VAE decoder needs 4.8 GB in bf16 and does not fit next to the DiT on a 16 GB card. CPU takes 1-2 min and touches no VRAM.">
+                            <option value="cpu" selected>CPU (seguro / safe, ~1-2 min)</option>
+                            <option value="cuda">CUDA (rápido / fast, +4,8 GB VRAM)</option>
+                        </select>
                     </div>
 
                     <div class="form-group">
                         <label>Preview Sampler / Muestreador:</label>
                         <select id="train_preview_shift" title="MiniMax-H3 solo tiene UN sampler (MiniMaxH3Scheduler: Euler de flow rectificado, eta=0). Lo unico ajustable es su desplazamiento sigma. Para una imagen suelta, shift 12 deja TODOS los pasos por encima de sigma 0.30 y satura el color. / H3 ships exactly one sampler; its sigma shift is the only knob. For a still image, shift 12 keeps every step above sigma 0.30 and oversaturates colour.">
                             <option value="12">Rectified Flow Euler · shift 12.0 (official video)</option>
-                            <option value="6">Rectified Flow Euler · shift 6.0</option>
+                            <option value="6" selected>Rectified Flow Euler · shift 6.0</option>
 							<option value="4.5">Rectified Flow Euler · shift 4.5</option>
-                            <option value="3" selected>Rectified Flow Euler · shift 3.0 (still image)</option>
+                            <option value="3">Rectified Flow Euler · shift 3.0 (still image)</option>
                             <option value="1.7">Rectified Flow Euler · shift 1.7 (= matches training)</option>
                             <option value="1">Rectified Flow Euler · shift 1.0 (unshifted)</option>
                         </select>
@@ -445,8 +463,6 @@
                             <option value="12">12 GB VRAM  &rarr;  GPU 10 &middot; Swap 1.35 &middot; Headroom 0.1</option>
                             <option value="10">10 GB VRAM  &rarr;  GPU 8 &middot; Swap 1.35 &middot; Headroom 0.1</option>
                             <option value="8">8 GB VRAM  &rarr;  GPU 6 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="6">6 GB VRAM  &rarr;  GPU 4 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="4">4 GB VRAM  &rarr;  GPU 2 &middot; Swap 1.35 &middot; Headroom 0.1</option>
                             <option value="custom">Custom / Personalizado</option>
                         </select>
                     </div>
@@ -769,6 +785,14 @@
         // editables a mano y lo que se guarda en el JSON es siempre el valor
         // que haya en el campo, no el perfil.
         //
+        // NO hay perfiles por debajo de 8 GB: los de 6 y 4 se probaron y NO caben.
+        // El suelo medido de VRAM para una corrida es ~7,2 GB, porque el presupuesto
+        // de swap tiene que cubrir un bloque NF4 MAS el peso bf16 completo que
+        // bitsandbytes materializa en cada matmul, y ademas hay que dejar sitio al
+        // contexto de CUDA y al escritorio de Windows.
+        // There are NO profiles below 8 GB: 6 and 4 were tested and do not fit. The
+        // measured VRAM floor for a run is ~7.2 GB.
+        //
         // The key is the card's TOTAL VRAM; "budget" (GPU VRAM) is that figure
         // minus 2 GB for the CUDA context, the driver and the Windows desktop.
         // Picking a profile only FILLS the three fields; they stay editable and
@@ -780,9 +804,7 @@
             '16': { budget: 14.0, swap: 1.35, headroom: 0.1 },
             '12': { budget: 10.0, swap: 1.35, headroom: 0.1 },
             '10': { budget:  8.0, swap: 1.35, headroom: 0.1 },
-            '8':  { budget:  6.0, swap: 1.35, headroom: 0.1 },
-            '6':  { budget:  4.0, swap: 1.35, headroom: 0.1 },
-            '4':  { budget:  2.0, swap: 1.35, headroom: 0.1 }
+            '8':  { budget:  6.0, swap: 1.35, headroom: 0.1 }
         };
 
         function applyVramProfile(key) {

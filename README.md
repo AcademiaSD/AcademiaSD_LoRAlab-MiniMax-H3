@@ -60,7 +60,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 ### Training
 - **🌐 Modern Web GUI** — pre-cache, dataset editing, training, previews, checkpoints and export from a single-page Flask app.
 - **🚀 1-Click launch** — `Run_LoRAlab-MiniMaxH3.bat` starts the server and opens `http://127.0.0.1:5000`.
-- **🎛️ VRAM profiles** — a dropdown with presets for **32, 24, 16, 12, 10, 8, 6 and 4 GB** cards. Every field stays editable by hand; the dropdown switches to *Custom* the moment you type, so it never advertises a preset that does not match your values.
+- **🎛️ VRAM profiles** — a dropdown with presets for **32, 24, 16, 12, 10 and 8 GB** cards. Every field stays editable by hand; the dropdown switches to *Custom* the moment you type, so it never advertises a preset that does not match your values.
 - **⏱️ Exact-step resume** — stop at any step and continue from it. The checkpoint is written atomically with a strict invariant (weights → optimizer → step file, and the step file only if the first two succeeded), so a kill mid-write can never leave an inconsistent resume point.
 - **🎲 Deterministic across pauses** — the RNG is seeded **per step** with a splitmix64 mix of `(seed, step)`, and the dataset sampler is a shuffled per-epoch permutation derived from the same step index. Step N always sees the same image, sigma and noise whether it came from one continuous run or ten resumes.
 - **🔁 Live settings** — edit preview settings, `save_every`, `lr`, `max_grad_norm` or lower `total_steps` **while training is running**, press *Save JSON*, and the change lands on the next step. Costs one `getmtime` per step.
@@ -92,7 +92,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | Requirement | Minimum | Recommended |
 | :--- | :--- | :--- |
 | **OS** | Windows 10/11 | Windows 11 |
-| **GPU** | NVIDIA, **12 GB VRAM** | NVIDIA, **16–24 GB VRAM** |
+| **GPU** | NVIDIA, **8 GB VRAM** | NVIDIA, **16–24 GB VRAM** |
 | **System RAM** | **32 GB** | **64 GB+** (block swap parks the model in RAM) |
 | **Disk** | **45 GB** free for the NF4 model | 60 GB+ |
 | **Python** | 3.10+ (inside `venv`) | 3.11 / 3.13 |
@@ -107,13 +107,11 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | **16 GB** | **14.0** | **1.35** | **0.1** | **Verified** |
 | 12 GB | 10.0 | 1.35 | 0.1 | Expected to work |
 | 10 GB | 8.0 | 1.35 | 0.1 | Expected to work |
-| 8 GB | 6.0 | 1.35 | 0.1 | Untested |
-| 6 GB | 4.0 | 1.35 | 0.1 | Optimistic — may not fit |
-| 4 GB | 2.0 | 1.35 | 0.1 | Optimistic — may not fit |
+| 8 GB | 6.0 | 1.35 | 0.1 | At the measured floor |
 
-The 6 GB and 4 GB profiles are included for experimentation. The swap budget has to hold one NF4 block **plus** the full bf16 weight that bitsandbytes materializes for each matmul, so very small budgets may not fit a block with its activations. Reports welcome.
+**There are no profiles below 8 GB.** 6 GB and 4 GB were tested and do **not** fit: the measured VRAM floor for a run is **~7.2 GB**. The swap budget has to hold one NF4 block **plus** the full bf16 weight that bitsandbytes materializes for every matmul, on top of the CUDA context and the desktop.
 
-Reference timing: **~8.4 s/it** on an RTX 5080 16 GB at 768×768 — about **2 hours for 1000 steps**.
+Reference timing: **~8.4 s/it** on an RTX 5080 16 GB at 768×768 — about **70 minutes for the default 500 steps**.
 
 ---
 
@@ -174,12 +172,12 @@ Recommended starting point, the configuration that produced the verified result:
 
 | Setting | Value |
 | :--- | :--- |
-| Total Steps | 1000 |
+| Total Steps | 500 |
 | Learning Rate | 2e-4 |
 | LoRA Rank / Alpha | 16 / 16 |
 | Batch Size | 1 |
 | Grad Accum | 1 |
-| Save Every | 200 |
+| Save Every | 100 |
 | Resolution | 768×768 |
 | Dataset | 8–20 images |
 
@@ -193,9 +191,9 @@ First signs of likeness usually appear between steps 400 and 600.
 | :--- | :--- |
 | Preview Every | 100 (0 = off) |
 | Caption Mode | First (to compare) or Random (for variety) |
-| Preview Steps | 20–30 |
+| Preview Steps | 20 |
 | Preview CFG | 1.0 (the checkpoint is guidance-distilled) |
-| Preview Sampler | shift 4.5–6.0 |
+| Preview Sampler | shift 6.0 |
 | VAE Device | CPU (safe) / CUDA (fast, needs 4.8 GB free) |
 
 For **Custom** prompts: type the prompt, save the **Pre-Cache** JSON and re-run the Pre-Cache once. The trainer has no text encoder by design, so a free prompt must be encoded beforehand.
@@ -258,7 +256,7 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 * **Image datasets only.** Video clips and audio training are not implemented. The trainer targets characters and styles.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
-* **The 6 GB and 4 GB profiles are unproven.** See the VRAM table.
+* **8 GB is the floor.** The measured minimum for a run is ~7.2 GB of VRAM; 6 GB and 4 GB profiles were tested and removed because they do not fit.
 * **Windows-focused.** The launchers are `.bat` files; the Python should run elsewhere but is untested.
 
 ---

@@ -125,7 +125,7 @@ DEFAULTS = {
     # grad_accum=1 -> cada micro-paso es un update: 2x updates por el mismo tiempo.
     # At 20 s/it wall time is set by total_steps, not grad_accum. accum=1 doubles
     # the number of updates for the same number of seconds.
-    "total_steps": 1500,
+    "total_steps": 500,
     "batch_size": 1,
     "grad_accum_steps": 1,
 
@@ -213,7 +213,7 @@ DEFAULTS = {
     # debajo de ~10 la imagen sale sin definir; 12-20 es el rango util para una
     # preview. Cada paso es un forward completo del DiT.
     # The model is not step-distilled: 12-20 is the useful range for a preview.
-    "preview_steps": 12,
+    "preview_steps": 20,
     # CFG. El checkpoint es guidance-distilled: NO tiene rama incondicional y la
     # receta oficial no usa CFG. <= 1.0 lo desactiva (recomendado). Por encima
     # de 1 se usa el prompt vacio cacheado (_neg) y CUESTA EL DOBLE de forwards.
@@ -225,7 +225,7 @@ DEFAULTS = {
     # bajos concentran los pasos en ruido medio-bajo.
     # H3 ships exactly ONE sampler, so this is the only real knob. 12.0 is the
     # official video sampler's shift.
-    "preview_shift": 12.0,
+    "preview_shift": 6.0,
     # Semilla de la preview. <= 0 = usa `seed`. Fijarla hace que todas las
     # previews sean el MISMO ruido inicial, que es lo que permite comparar
     # pasos entre si en vez de mirar imagenes sin relacion.
@@ -244,6 +244,27 @@ DEFAULTS = {
     # The decoder expands each latent frame into 4 pixel frames; 0 is what
     # decode_cached_latent.py uses. Try 3 if previews look wrong.
     "preview_frame_index": 0,
+    # --- Fotogramas de la preview ------------------------------------------
+    # 1 = modo imagen: UN solo frame latente. Es lo que se entrena y lo mas
+    # barato, pero es un regimen que el modelo base no ha visto nunca al
+    # GENERAR: H3 es un modelo de video y siempre produce secuencias, donde el
+    # detalle fino queda sujeto a la coherencia temporal. La sospecha, aun sin
+    # confirmar, es que por eso las previews salen blandas mientras el mismo
+    # latente REAL del dataset decodifica nitido.
+    #
+    # >1 genera un clip corto y guarda un fotograma. El valor se ajusta a la
+    # rejilla 17n+5 del VAE, que da 5n+2 frames latentes:
+    #    5 frames  -> 2 frames latentes  (~2x el coste, prueba rapida)
+    #   22 frames  -> 7 frames latentes  (~8x el coste, regimen nativo)
+    # Es un EXPERIMENTO: si a 22 la imagen sale nitida, el problema es generar
+    # un fotograma aislado y habra que decidir si compensa el coste.
+    #
+    # 1 = image mode, one latent frame: cheapest and what training uses, but a
+    # regime the base model never sees when GENERATING. >1 renders a short clip
+    # and saves one frame, snapped to the VAE's 17n+5 grid (5n+2 latent frames).
+    # An experiment: if 22 comes out sharp, isolated single-frame generation is
+    # the problem.
+    "preview_num_frames": 1,
     # Decodifica el latente REAL de la primera imagen del dataset al arrancar y
     # lo guarda como preview_step_0.png. Sirve de doble control: valida que toda
     # la ruta del decoder funciona ANTES de gastar horas, y deja una referencia
@@ -252,8 +273,8 @@ DEFAULTS = {
     # preview_step_0.png: validates the decoder path before wasting hours and
     # leaves a visual reference to compare progress against.
 
-    "save_every": 200,
-    "seed": 314159,
+    "save_every": 100,
+    "seed": 314156,
     "frame_rate": 24.0,
     "project_name": "",
     "trigger_word": "",
@@ -347,14 +368,14 @@ DEFAULTS = {
     # Si te sobra VRAM, subelo otra vez a 16.0 (ira mas rapido: menos block swap).
     # Si te falta, baja a 13.0 antes de tocar el rank.
     # rank 16 + fp32 LoRA + fp32 Adam state costs ~1.5 GB more than rank 8 in bf16.
-    "vram_budget_gb": 6.0,
+    "vram_budget_gb": 14.0,
     # Debe cubrir 1 bloque NF4 (~0,33 GB) MAS el peso bf16 que bitsandbytes
     # materializa entero para cada matmul: el traceback muestra que bnb cae en
     # `_dequant_linear_fallback` (nada de kernel fusionado) y pide 294 MB de golpe
     # para el proj del FF. 1,5 GB sobra; 2,5 es holgado.
     # bnb falls back to _dequant_linear_fallback: it materializes the FULL bf16
     # weight for every matmul (294 MB for the FF proj in your traceback).
-    "vram_swap_gb": 2.0,
+    "vram_swap_gb": 1.35,
     # El headroom tiene que cubrir TODO lo que no son pesos residentes: activaciones,
     # el grafo de autograd, los gradientes, el estado de AdamW, los pesos bf16 que
     # bitsandbytes materializa al hacer backward de cada Linear4bit, y los workspaces
@@ -362,7 +383,7 @@ DEFAULTS = {
     # consumo real se iba siempre muy por encima del presupuesto.
     # Headroom must cover activations, autograd graph, grads, AdamW state, the bf16
     # weights bnb materializes during backward, and cuBLAS/SDPA workspaces.
-    "vram_headroom_gb": 1.5,
+    "vram_headroom_gb": 0.1,
 
     # --- Contabilidad REAL de VRAM -------------------------------------------
     # vram_budget_gb solo contabiliza PESOS RESIDENTES medidos con memory_allocated()
@@ -925,6 +946,7 @@ PREVIEW_VAE_DEVICE = str(
 if PREVIEW_VAE_DEVICE not in ("cpu", "cuda"):
     PREVIEW_VAE_DEVICE = "cpu"
 PREVIEW_FRAME_INDEX = int(cfg_get("preview_frame_index", DEFAULTS["preview_frame_index"]) or 0)
+PREVIEW_NUM_FRAMES = max(1, int(cfg_get("preview_num_frames", DEFAULTS["preview_num_frames"]) or 1))
 
 SAVE_EVERY = int(cfg_get("save_every", DEFAULTS["save_every"]))
 SEED = int(cfg_get("seed", DEFAULTS["seed"]))
@@ -5612,6 +5634,32 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
         latent_shape = tuple(ref.shape)
         _, _, n_f, lat_h, lat_w = latent_shape
 
+        # ----------------------------------------------------------------
+        # CUANTOS FRAMES LATENTES GENERAR.
+        #
+        # Por defecto 1: modo imagen, el mismo que entrena. Con
+        # preview_num_frames > 1 se genera un clip corto ajustado a la rejilla
+        # 17n+5 del VAE, que produce 5n+2 frames latentes, y se guarda un
+        # fotograma del centro. Cuesta proporcionalmente mas (la atencion crece
+        # con el cuadrado de la secuencia), pero pone al DiT en su regimen
+        # nativo de video.
+        # How many latent frames to generate. Default 1 (image mode, what
+        # training uses). >1 renders a clip on the VAE's 17n+5 grid (5n+2 latent
+        # frames) and saves a middle frame.
+        # ----------------------------------------------------------------
+        preview_frames = max(1, int(PREVIEW_NUM_FRAMES))
+        if preview_frames > 1:
+            n_chunks = max(0, (preview_frames - 5 + 16) // 17)
+            preview_frames = 17 * n_chunks + 5
+            n_lat = 5 * n_chunks + 2
+        else:
+            n_lat = 1
+        latent_shape = (latent_shape[0], latent_shape[1], n_lat, lat_h, lat_w)
+        if n_lat != n_f:
+            log_print("[PREVIEW] Clip mode / modo clip: {} frames -> {} latent frames "
+                      "({}x the video tokens / {}x los tokens de video)".format(
+                          preview_frames, n_lat, n_lat, n_lat), flush=True)
+
         seed = PREVIEW_SEED if PREVIEW_SEED > 0 else (SEED if SEED > 0 else random.randint(1, 2 ** 31 - 1))
         gen = torch.Generator(device="cuda").manual_seed(int(seed))
         latent = torch.randn(latent_shape, generator=gen, device="cuda", dtype=torch.float32)
@@ -5643,7 +5691,8 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
         # waveform is decoded at the end.
         # ----------------------------------------------------------------
         _AUDIO_LATENTS_PER_SECOND = 40.0
-        a_lat = max(1, int(round(1.0 / float(FRAME_RATE) * _AUDIO_LATENTS_PER_SECOND)))
+        a_lat = max(1, int(round(float(preview_frames) / float(FRAME_RATE)
+                                 * _AUDIO_LATENTS_PER_SECOND)))
         a_rows = a_lat * int(audio_channels)
         audio = torch.randn((1, a_rows, 32), generator=gen, device="cuda",
                             dtype=torch.float32)
@@ -5774,8 +5823,12 @@ def run_training_preview(model, entries, step, output_dir, nf4_dir,
         free_vram(clear_cache=True, collect=True)
 
         out_path = os.path.join(output_dir, "preview_step_{}.png".format(step))
+        # Con un clip, el fotograma del centro: los extremos temporales son los
+        # que peor se resuelven. Con una imagen suelta manda preview_frame_index.
+        # For a clip, take a middle frame: the temporal edges resolve worst.
+        _frame_idx = PREVIEW_FRAME_INDEX if n_lat == 1 else (n_lat * 4) // 2
         decode_latent_to_png(latent_out.cpu(), nf4_dir, out_path,
-                             device=PREVIEW_VAE_DEVICE, frame_index=PREVIEW_FRAME_INDEX)
+                             device=PREVIEW_VAE_DEVICE, frame_index=_frame_idx)
         return out_path
 
     finally:
@@ -6340,6 +6393,7 @@ def hot_reload_live_settings():
     Re-reads train_settings.json when it changed and applies the whitelist."""
     global PREVIEW_EVERY, PREVIEW_STEPS, PREVIEW_CFG, PREVIEW_SHIFT, PREVIEW_SEED
     global PREVIEW_VAE_DEVICE, PREVIEW_FRAME_INDEX, PREVIEW_CAPTION_MODE
+    global PREVIEW_NUM_FRAMES
     global SAVE_EVERY, LR, MAX_GRAD_NORM, TOTAL_STEPS, DEBUG_TRAINING
 
     try:
@@ -6411,6 +6465,8 @@ def hot_reload_live_settings():
     PREVIEW_SHIFT = _fresh("preview_shift", lambda v: float(v or 12.0), PREVIEW_SHIFT)
     PREVIEW_SEED = _fresh("preview_seed", lambda v: int(v if v is not None else -1), PREVIEW_SEED)
     PREVIEW_FRAME_INDEX = _fresh("preview_frame_index", lambda v: int(v or 0), PREVIEW_FRAME_INDEX)
+    PREVIEW_NUM_FRAMES = _fresh("preview_num_frames", lambda v: max(1, int(v or 1)),
+                                PREVIEW_NUM_FRAMES)
 
     def _cast_device(v):
         v = str(v).strip().lower()
@@ -6484,7 +6540,7 @@ def reload_runtime_config():
     global PROJECT_NAME, TRIGGER_WORD, NF4_CACHE_DIR, SEED
     global CACHE_DIR, OUTPUT_DIR, RESUME_DIR, OPT_FILE, STEP_FILE, LOSS_STATE_FILE
     global PREVIEW_EVERY, PREVIEW_STEPS, PREVIEW_CFG, PREVIEW_SHIFT, PREVIEW_SEED
-    global PREVIEW_CAPTION_MODE
+    global PREVIEW_CAPTION_MODE, PREVIEW_NUM_FRAMES
 
     if os.path.exists(CONFIG_PATH):
         try:
@@ -6560,6 +6616,8 @@ def reload_runtime_config():
         PREVIEW_VAE_DEVICE = "cpu"
     PREVIEW_FRAME_INDEX = int(
         cfg_get("preview_frame_index", DEFAULTS["preview_frame_index"]) or 0)
+    PREVIEW_NUM_FRAMES = max(1, int(
+        cfg_get("preview_num_frames", DEFAULTS["preview_num_frames"]) or 1))
 
     MAX_TEXT_TOKENS = int(cfg_get("max_text_tokens", DEFAULTS["max_text_tokens"]) or 0)
     CAPTION_DROPOUT = float(cfg_get("caption_dropout", DEFAULTS["caption_dropout"]) or 0.0)
