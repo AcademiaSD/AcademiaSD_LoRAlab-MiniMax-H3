@@ -456,15 +456,17 @@
 
                     <div class="form-group">
                         <label>VRAM Profile / Perfil de VRAM:</label>
-                        <select id="train_vram_profile" onchange="applyVramProfile(this.value)" title="Preset segun la VRAM de tu tarjeta. Los tres campos de abajo siguen siendo editables a mano. / Preset for your card's VRAM. The three fields below stay editable by hand.">
-                            <option value="32">32 GB VRAM  &rarr;  GPU 30 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="24">24 GB VRAM  &rarr;  GPU 22 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="16" selected>16 GB VRAM  &rarr;  GPU 14 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="12">12 GB VRAM  &rarr;  GPU 10 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="10">10 GB VRAM  &rarr;  GPU 8 &middot; Swap 1.35 &middot; Headroom 0.1</option>
-                            <option value="8">8 GB VRAM  &rarr;  GPU 6 &middot; Swap 1.35 &middot; Headroom 0.1</option>
+                        <select id="train_vram_profile" onchange="applyVramProfile(this.value)" title="Calcula GPU VRAM, Swap y Headroom para el tamano de tarjeta elegido, con TU resolucion y TUS captions. Elegir 8/10/12 SIMULA esa tarjeta en la que tienes. / Computes the three fields for the chosen card size using your resolution and captions. Picking 8/10/12 SIMULATES that card on the one you have.">
+                            <option value="auto" selected>Auto &mdash; detectar mi GPU / detect my GPU</option>
+                            <option value="32">Simular / Simulate 32 GB</option>
+                            <option value="24">Simular / Simulate 24 GB</option>
+                            <option value="16">Simular / Simulate 16 GB</option>
+                            <option value="12">Simular / Simulate 12 GB</option>
+                            <option value="10">Simular / Simulate 10 GB</option>
+                            <option value="8">Simular / Simulate 8 GB</option>
                             <option value="custom">Custom / Personalizado</option>
                         </select>
+                        <span id="vram_auto_info" style="font-size:0.7rem; color:var(--text-muted); display:block; margin-top:4px; line-height:1.35;"></span>
                     </div>
 
                     <div class="form-row">
@@ -474,7 +476,7 @@
                         </div>
                         <div class="form-group">
                             <label>VRAM SWAP:</label>
-                            <input type="number" step="0.1" id="train_vram_swap_gb" value="1.35" oninput="markVramProfileCustom()">
+                            <input type="number" step="0.1" id="train_vram_swap_gb" value="1.34" oninput="markVramProfileCustom()">
                         </div>
                     </div>
 
@@ -482,6 +484,28 @@
                         <div class="form-group">
                             <label>VRAM HEADROOM:</label>
                             <input type="number" step="0.1" id="train_vram_headroom_gb" value="0.1" oninput="markVramProfileCustom()">
+                        </div>
+                        <!-- RAM LIMIT: techo de RAM del proceso. Los bloques NF4 que no
+                             caben por debajo de ese techo se aparcan en un fichero
+                             mapeado en memoria en vez de en RAM. 0 = sin limite (todo
+                             en RAM, comportamiento por defecto).
+                             RAM LIMIT: process RAM ceiling. NF4 blocks that do not fit
+                             under it are parked in a memory-mapped file instead of RAM.
+                             0 = no limit (all in RAM, the default). -->
+                        <div class="form-group">
+                            <label>BLOCK SWAP STORAGE:</label>
+                            <select id="train_park_mode" title="Where the blocks that do not fit in VRAM live. Disk measured FASTER than RAM (7.43 vs 8.14 s/it) and uses less memory (26 vs ~35 GB), and those blocks become evictable so the machine degrades instead of running out. In exchange it writes ~13 GB to disk at startup and needs the free space. / Donde viven los bloques que no caben en VRAM. Disk midio MAS RAPIDO que RAM (7,43 contra 8,14 s/it) y gasta menos memoria (26 contra ~35 GB), y esos bloques pasan a ser desalojables, asi que la maquina degrada en vez de quedarse sin memoria. A cambio escribe ~13 GB al disco al arrancar y necesita ese espacio libre.">
+                                <option value="auto" selected>Auto &mdash; RAM, y a disco lo que no quepa / RAM, spilling what does not fit</option>
+                                <option value="ram">RAM &mdash; siempre en memoria / always in memory</option>
+                                <option value="disk">Disk &mdash; siempre en fichero / always in a file</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>RAM LIMIT (GB) &mdash; system:</label>
+                            <input type="number" step="1" min="0" id="train_ram_limit_gb" value="0" title="Only used in Auto mode. Ceiling for TOTAL system RAM, the figure you see in Task Manager. 0 = no limit, everything stays in RAM. Above 0, the blocks that would push the machine past it are parked in a memory-mapped file instead. / Solo se usa en modo Auto. Techo de la RAM TOTAL del sistema, la cifra que ves en el Administrador de tareas. 0 = sin limite, todo se queda en RAM. Por encima de 0, los bloques que pasarian de ese techo se aparcan en un fichero mapeado en memoria.">
                         </div>
                         <!-- DEBUG ON/OFF - OCULTO DE LA INTERFAZ CON display:none;
                              Se oculta para la beta publica: el modo debug llena la
@@ -680,6 +704,8 @@
                 document.getElementById('ram-text').innerText = `${data.ram.used_gb} / ${data.ram.total_gb} GB`;
                 document.getElementById('ram-bar').style.width = `${data.ram.percent}%`;
                 document.getElementById('vram-text').innerText = `${data.vram.used_gb} / ${data.vram.total_gb} GB`;
+                // La usa el calculo automatico de VRAM. / Used by the automatic VRAM sizing.
+                if (data.vram.total_gb > 0) detectedVramGb = data.vram.total_gb;
                 document.getElementById('vram-bar').style.width = `${data.vram.percent}%`;
 
                 const temp = data.vram.temp_c || 0;
@@ -798,23 +824,145 @@
         // Picking a profile only FILLS the three fields; they stay editable and
         // what gets saved to the JSON is always the field value, not the preset.
         // =====================================================================
-        const VRAM_PROFILES = {
-            '32': { budget: 30.0, swap: 1.35, headroom: 0.1 },
-            '24': { budget: 22.0, swap: 1.35, headroom: 0.1 },
-            '16': { budget: 14.0, swap: 1.35, headroom: 0.1 },
-            '12': { budget: 10.0, swap: 1.35, headroom: 0.1 },
-            '10': { budget:  8.0, swap: 1.35, headroom: 0.1 },
-            '8':  { budget:  6.0, swap: 1.35, headroom: 0.1 }
+        // =====================================================================
+        // MODELO DE VRAM. TODO EN GiB, que es lo que reporta nvidia-smi.
+        //
+        // OJO CON LAS UNIDADES: la telemetria da total_gb = 15.92 para una 5080,
+        // y eso son 15,92 GiB, no GB decimales. Convertirlo a GB (x1024^3/1e9)
+        // inventaba un 7% de VRAM que no existe y el calculo se quedaba corto:
+        // predecia un pico de 15,62 donde la medicion real fue 15,90, con la
+        // tarjeta ya tirando de memoria compartida.
+        //
+        // Calibrado con cinco medidas reales en una RTX 5080 16 GB:
+        //   768^2, 27 bloques -> 15,40 GiB   optimo, 8,33 s/it
+        //   768^2, 28 bloques -> 15,60 GiB   8,39 s/it
+        //   768^2, 29 bloques -> saturaba,   11,05 s/it
+        //   512^2, 29 bloques -> 7,23 s/it   OK
+        //   512^2, 31 bloques -> 15,90 GiB   memoria compartida, 10,73 y subiendo
+        // El ajuste reproduce las cinco con +-0,11 GiB.
+        //
+        // EVERYTHING IN GiB, the unit nvidia-smi reports. Converting it to decimal
+        // GB invented 7% of VRAM that does not exist and made the estimate fall
+        // short. Calibrated against five real measurements; reproduces them to
+        // within 0.11 GiB.
+        // =====================================================================
+        const VRAM_MODEL = {
+            BLOCK_GIB:  0.310320,  // un bloque residente del DiT
+            BASE_GIB:   1.919,     // modulos fuera de bloques
+            NW_CONST:   3.4905,    // no-pesos: parte que no depende de la secuencia
+            NW_PER_TOK: 0.002317,  // no-pesos: por token de secuencia
+            SLACK_GIB:  0.50,      // aire bajo el TOTAL de la tarjeta; por debajo de
+                                   // ~0,3 empiezan los reintentos y la memoria compartida
+            BLOCK_GB:   0.333205,  // el mismo bloque en GB decimales, para el budget
+            BASE_GB:    2.06,
+            OVERHEAD:   2.5,       // vram_training_overhead_gb, va DENTRO del budget
+            SWAP:       1.34,      // minimo real: el guard exige bloque x 4 = 1,3328
+            HEADROOM:   0.10,
+            MAX_BLOCKS: 50
         };
 
-        function applyVramProfile(key) {
-            const p = VRAM_PROFILES[String(key)];
-            // 'custom' no toca nada: conserva lo que el usuario haya escrito.
-            // 'custom' touches nothing: it keeps whatever the user typed.
-            if (!p) return;
-            document.getElementById('train_vram_budget_gb').value = p.budget;
-            document.getElementById('train_vram_swap_gb').value = p.swap;
-            document.getElementById('train_vram_headroom_gb').value = p.headroom;
+        // Ultimos datos leidos de la cache, si existe.
+        let vramCacheInfo = null;
+
+        // Tokens de la secuencia mas larga del dataset, que es la que marca el pico.
+        // Sin cache se usa max_seq_len como peor caso, que es conservador.
+        // Longest sequence in the dataset, which is what sets the peak.
+        function vramSequenceTokens() {
+            const formArea = parseInt(document.getElementById('precache_target_area').value) || 589824;
+            let area = formArea;
+            let textTokens = parseInt(document.getElementById('precache_max_seq_len').value) || 192;
+            let source = 'peor caso, sin cache / worst case, no cache';
+            let stale = false;
+
+            // LA CACHE MANDA sobre el formulario: el entrenamiento usa SUS latentes,
+            // construidos con SU area, no con la que este escrita ahora en la interfaz.
+            // THE CACHE WINS over the form: training uses ITS latents, built with ITS
+            // area, not whatever is currently typed in the UI.
+            if (vramCacheInfo && vramCacheInfo.available) {
+                if (vramCacheInfo.max_text_tokens > 0) textTokens = vramCacheInfo.max_text_tokens;
+                if (vramCacheInfo.cached_target_area > 0) area = vramCacheInfo.cached_target_area;
+                source = `cache de ${vramCacheInfo.images} img`;
+                stale = !!(vramCacheInfo.cached_target_area &&
+                           vramCacheInfo.cached_target_area !== formArea);
+            }
+            const videoTokens = Math.round(area / 1024);
+            return { total: textTokens + videoTokens + 4, textTokens, videoTokens,
+                     area, formArea, source, stale };
+        }
+
+        // Devuelve los tres valores para una tarjeta de `targetGb`.
+        // targetGiB: el TOTAL de la tarjeta tal cual lo da nvidia-smi (GiB).
+        // El pico modelado ya incluye el contexto de CUDA y el escritorio, porque
+        // se calibro contra el "used" total de nvidia-smi, no contra lo que pide
+        // el proceso. Por eso no se resta ninguna reserva: solo el aire (SLACK).
+        // targetGiB is the card's TOTAL as nvidia-smi reports it. The modelled peak
+        // already includes the CUDA context and the desktop, because it was fitted
+        // against nvidia-smi's total "used" rather than the process allocation, so
+        // nothing is subtracted except the safety slack.
+        function vramComputeFor(targetGiB) {
+            const M = VRAM_MODEL;
+            const seq = vramSequenceTokens();
+            const nonWeights = M.NW_CONST + M.NW_PER_TOK * seq.total;      // GiB
+            const room = targetGiB - M.SLACK_GIB - nonWeights - M.BASE_GIB;
+            let blocks = Math.floor(room / M.BLOCK_GIB);
+            blocks = Math.max(0, Math.min(M.MAX_BLOCKS, blocks));
+            const peak = M.BASE_GIB + blocks * M.BLOCK_GIB + nonWeights;   // GiB
+            // El budget que espera el entrenador va en GB decimales.
+            // The budget the trainer expects is in decimal GB.
+            const budget = Math.round((M.BASE_GB + blocks * M.BLOCK_GB + M.OVERHEAD) * 100) / 100;
+            const fits = blocks > 0 && (targetGiB - peak) > 0;
+            return { blocks, budget, peak, usable: targetGiB, nonWeights, seq, fits,
+                     swap: M.SWAP, headroom: M.HEADROOM };
+        }
+
+        // GB de la tarjeta detectada por la telemetria (nvidia-smi), o null.
+        let detectedVramGb = null;
+
+        async function applyVramProfile(key) {
+            const info = document.getElementById('vram_auto_info');
+            if (String(key) === 'custom') {
+                if (info) info.innerHTML = 'Valores manuales / manual values.';
+                return;
+            }
+            try {
+                const res = await fetch('/api/cache-info');
+                vramCacheInfo = await res.json();
+            } catch (e) { vramCacheInfo = null; }
+
+            let targetGb = parseFloat(key);
+            let modo = `simulando / simulating ${targetGb} GB`;
+            if (String(key) === 'auto') {
+                if (!detectedVramGb) {
+                    if (info) info.innerHTML = '<span style="color:var(--warning)">GPU no detectada '
+                        + 'todavia; espera unos segundos y vuelve a elegir Auto. / GPU not detected yet.</span>';
+                    return;
+                }
+                targetGb = detectedVramGb;
+                modo = `GPU detectada / detected: ${targetGb.toFixed(1)} GB`;
+            }
+
+            const r = vramComputeFor(targetGb);
+            document.getElementById('train_vram_budget_gb').value = r.budget.toFixed(2);
+            document.getElementById('train_vram_swap_gb').value = r.swap.toFixed(2);
+            document.getElementById('train_vram_headroom_gb').value = r.headroom.toFixed(2);
+
+            if (!info) return;
+            if (!r.fits || r.blocks === 0) {
+                info.innerHTML = `<span style="color:var(--danger)">No cabe en ${targetGb} GB a esta `
+                    + `resolucion (pico ${r.peak.toFixed(2)} GB &gt; ${r.usable.toFixed(2)} utilizables). `
+                    + `Baja la resolucion del pre-cache. / Does not fit; lower the pre-cache resolution.</span>`;
+                return;
+            }
+            let txt = `${modo} &middot; ${r.blocks}/50 bloques residentes &middot; pico estimado `
+                    + `${r.peak.toFixed(2)} GB de ${r.usable.toFixed(2)} utilizables `
+                    + `(${(r.usable - r.peak).toFixed(2)} de aire). Secuencia ${r.seq.total} tokens = `
+                    + `${r.seq.textTokens} texto + ${r.seq.videoTokens} video + 4 audio [${r.seq.source}].`;
+            if (r.seq.stale) {
+                txt += ` <span style="color:var(--warning)">La cache se hizo con area ${r.seq.area} y el `
+                     + `formulario dice ${r.seq.formArea}: manda la cache. / The cache was built at a `
+                     + `different area than the form; the cache wins.</span>`;
+            }
+            info.innerHTML = txt;
         }
 
         // Editar a mano cualquiera de los tres campos pasa el desplegable a
@@ -828,27 +976,33 @@
             if (sel) sel.value = 'custom';
         }
 
-        // Tras cargar valores de un JSON, selecciona el perfil que coincida
-        // exactamente con los tres; si no coincide ninguno, "Custom".
-        // After loading values from a JSON, select the profile that matches all
-        // three exactly; "Custom" if none does.
+        // Tras cargar un JSON, mira si los tres valores coinciden con lo que el
+        // modelo calcularia para alguna de las tarjetas de la lista. Si no, Custom.
+        // Ya no hay tabla fija de perfiles: el budget depende de la resolucion y
+        // de los captions, asi que la comparacion tiene que RECALCULAR.
+        // After loading a JSON, check whether the three values match what the model
+        // would compute for any listed card; otherwise Custom. There is no fixed
+        // profile table any more, so the comparison has to RECOMPUTE.
         function syncVramProfileFromValues() {
             const sel = document.getElementById('train_vram_profile');
             if (!sel) return;
             const b = parseFloat(document.getElementById('train_vram_budget_gb').value);
-            const s = parseFloat(document.getElementById('train_vram_swap_gb').value);
+            const sw = parseFloat(document.getElementById('train_vram_swap_gb').value);
             const h = parseFloat(document.getElementById('train_vram_headroom_gb').value);
             let match = 'custom';
-            for (const key of Object.keys(VRAM_PROFILES)) {
-                const p = VRAM_PROFILES[key];
-                if (Math.abs(p.budget - b) < 1e-6 &&
-                    Math.abs(p.swap - s) < 1e-6 &&
-                    Math.abs(p.headroom - h) < 1e-6) {
-                    match = key;
+            for (const opt of Array.from(sel.options)) {
+                if (opt.value === 'custom' || opt.value === 'auto') continue;
+                const r = vramComputeFor(parseFloat(opt.value));
+                if (Math.abs(r.budget - b) < 0.005 &&
+                    Math.abs(r.swap - sw) < 0.005 &&
+                    Math.abs(r.headroom - h) < 0.005) {
+                    match = opt.value;
                     break;
                 }
             }
             sel.value = match;
+            const info = document.getElementById('vram_auto_info');
+            if (info && match === 'custom') info.innerHTML = 'Valores manuales / manual values.';
         }
 
         async function loadSettings() {
@@ -897,6 +1051,8 @@
                     if (t.preview_seed !== undefined) document.getElementById('train_preview_seed').value = t.preview_seed;
 
                     if (t.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = t.vram_budget_gb;
+                    if (t.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = t.ram_limit_gb;
+                    if (t.park_mode !== undefined) document.getElementById('train_park_mode').value = t.park_mode;
                     if (t.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = t.vram_swap_gb;
                     if (t.vram_headroom_gb !== undefined) document.getElementById('train_vram_headroom_gb').value = t.vram_headroom_gb;
                     // El desplegable se deriva de los tres valores reales, no de
@@ -973,6 +1129,8 @@
                     if (data.preview_seed !== undefined) document.getElementById('train_preview_seed').value = data.preview_seed;
 
                     if (data.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = data.vram_budget_gb;
+                    if (data.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = data.ram_limit_gb;
+                    if (data.park_mode !== undefined) document.getElementById('train_park_mode').value = data.park_mode;
                     if (data.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = data.vram_swap_gb;
                     if (data.vram_headroom_gb !== undefined) document.getElementById('train_vram_headroom_gb').value = data.vram_headroom_gb;
                     syncVramProfileFromValues();
@@ -1078,6 +1236,8 @@
                 preview_seed: parseInt(document.getElementById('train_preview_seed').value),
 
                 vram_budget_gb: parseFloat(document.getElementById('train_vram_budget_gb').value),
+                ram_limit_gb: parseFloat(document.getElementById('train_ram_limit_gb').value) || 0,
+                park_mode: document.getElementById('train_park_mode').value,
                 vram_swap_gb: parseFloat(document.getElementById('train_vram_swap_gb').value),
                 vram_headroom_gb: parseFloat(document.getElementById('train_vram_headroom_gb').value),
                 // Solo informativo: el entrenador lee los tres numeros de arriba

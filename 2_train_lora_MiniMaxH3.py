@@ -17,7 +17,9 @@ Estrategia:
   se mueven a GPU justo antes de forward/backward y se devuelven a CPU.
 """
 
+import atexit
 import os
+import shutil
 import platform
 
 
@@ -362,6 +364,32 @@ DEFAULTS = {
     "lora_key_prefix": "diffusion_model.",
     "low_vram_12gb": True,
     "activation_offload": False,
+    # Techo de RAM del proceso, en GB. 0 = sin limite (comportamiento de
+    # siempre: todos los bloques aparcados van a RAM). Con un valor > 0, en
+    # cuanto el proceso alcanza ese techo los bloques restantes se aparcan en
+    # un fichero mapeado en memoria en vez de en RAM.
+    # Process RAM ceiling, in GB. 0 = no limit (usual behaviour: every parked
+    # block goes to RAM). With a value > 0, once the process reaches that
+    # ceiling the remaining blocks are parked in a memory-mapped file instead.
+    # Reutilizar la copia CPU de los bloques swapeados en vez de rehacerla con
+    # una copia D2H cada vez. Es una mejora grande (medido 16,58 -> 9,61 s/it) y
+    # es segura porque los pesos NF4 estan congelados. Ponlo a False solo para
+    # descartar que sea la causa de algun problema.
+    # Reuse the CPU copy of swapped blocks instead of remaking it with a D2H copy
+    # every time. Big win (measured 16.58 -> 9.61 s/it) and safe because the NF4
+    # weights are frozen. Set to False only to rule it out as a cause of trouble.
+    "nf4_cpu_home": True,
+    # Donde viven los bloques que no caben en VRAM:
+    #   "ram"   siempre en RAM (mas rapido si hay RAM de sobra)
+    #   "disk"  siempre en un fichero mapeado (para maquinas con poca RAM)
+    #   "auto"  RAM, y solo pasan a disco los que no quepan bajo ram_limit_gb
+    # Where the blocks that do not fit in VRAM live:
+    #   "ram"   always in RAM (fastest when RAM is plentiful)
+    #   "disk"  always in a mapped file (for machines short on RAM)
+    #   "auto"  RAM, spilling to disk only what does not fit under ram_limit_gb
+    "park_mode": "auto",
+    "ram_limit_gb": 0.0,
+    "park_disk_dir": "",
     "loss_chunk_elements": 125000,
     # Rank 16 + pesos LoRA fp32 + estado de AdamW fp32 ocupan ~1,5 GB mas que
     # rank 8 en bf16. Se le quitan al presupuesto residente para no acabar en OOM.
@@ -397,7 +425,7 @@ DEFAULTS = {
     # at 496 MiB, not the FF proj at 294 MiB. Real peak 0.853 GB; the rest is
     # allocator-fragmentation margin. Do not go below 1.34 without also changing
     # the factor, and without measuring.
-    "vram_swap_gb": 1.35,
+    "vram_swap_gb": 1.34,
     # El headroom tiene que cubrir TODO lo que no son pesos residentes: activaciones,
     # el grafo de autograd, los gradientes, el estado de AdamW, los pesos bf16 que
     # bitsandbytes materializa al hacer backward de cada Linear4bit, y los workspaces
@@ -719,6 +747,7 @@ def log_print(*args, **kwargs):
         # resident and how big the non-block base is; without it vram_budget_gb
         # cannot be tuned. It was hidden with debug_training=False.
         "[VRAM-PLAN]",
+        "[SPILL]",
         # El resumen del dataset son 3-4 lineas una sola vez por corrida y es
         # justo lo que hay que tener delante al decidir el siguiente experimento.
         # Ya no lleva [WARN] porque no es un aviso: es informacion.
@@ -996,6 +1025,12 @@ LORA_KEY_PREFIX = str(cfg_get("lora_key_prefix", DEFAULTS["lora_key_prefix"]))
 
 LOW_VRAM_12GB = _cfg_bool("low_vram_12gb", DEFAULTS["low_vram_12gb"])
 ACTIVATION_OFFLOAD = _cfg_bool("activation_offload", DEFAULTS["activation_offload"])
+NF4_CPU_HOME = _cfg_bool("nf4_cpu_home", DEFAULTS["nf4_cpu_home"])
+PARK_MODE = str(cfg_get("park_mode", DEFAULTS["park_mode"])).strip().lower()
+if PARK_MODE not in ("auto", "ram", "disk"):
+    PARK_MODE = "auto"
+RAM_LIMIT_GB = float(cfg_get("ram_limit_gb", DEFAULTS["ram_limit_gb"]))
+PARK_DISK_DIR = str(cfg_get("park_disk_dir", DEFAULTS["park_disk_dir"]))
 LOSS_CHUNK_ELEMENTS = int(cfg_get("loss_chunk_elements", DEFAULTS["loss_chunk_elements"]))
 
 VRAM_BUDGET_GB = float(cfg_get("vram_budget_gb", DEFAULTS["vram_budget_gb"]))
@@ -1084,6 +1119,10 @@ log_print("  Use Audio Loss      : {}".format("ON" if USE_AUDIO_LOSS else "OFF")
 log_print("  Seed                : {} ({})".format(SEED, "RANDOM" if SEED <= 0 else "FIXED"))
 log_print("  Low VRAM 12GB mode  : {}".format("ON" if LOW_VRAM_12GB else "OFF"))
 log_print("  Activation Offload  : {}".format("ON" if ACTIVATION_OFFLOAD else "OFF"))
+log_print("  NF4 CPU Home        : {}".format("ON" if NF4_CPU_HOME else "OFF"))
+log_print("  Block Park Mode     : {}".format(PARK_MODE.upper()))
+log_print("  RAM Limit GB        : {}".format(
+    RAM_LIMIT_GB if RAM_LIMIT_GB > 0 else "OFF (sin limite / no limit)"))
 log_print("  Loss Chunk Elements : {}".format(LOSS_CHUNK_ELEMENTS))
 log_print("  CPU Offload Bloques : {}".format("ON" if CPU_OFFLOAD_BLOCKS_ENABLED else "OFF"))
 log_print("  VRAM Budget GB      : {}".format(VRAM_BUDGET_GB))
@@ -3986,7 +4025,272 @@ def _move_quant_state_to_device(qs, device):
     return qs
 
 
-def _move_params4bit_to_device(p, device):
+# =============================================================================
+# SPILL A DISCO DE BLOQUES NF4 APARCADOS / DISK SPILL FOR PARKED NF4 BLOCKS
+# =============================================================================
+# Los bloques que no caben en VRAM se aparcan en RAM como tensores anonimos: o
+# caben o el proceso muere. Pero los pesos NF4 son de SOLO LECTURA (estan
+# congelados; el swap solo los copia a GPU y los descarta), asi que pueden vivir
+# en un fichero mapeado en memoria. Entonces el SO los mantiene en cache
+# mientras haya sitio y los desaloja bajo presion en vez de matar el proceso.
+#
+# Parked blocks live in RAM as anonymous tensors: they either fit or the process
+# dies. But the NF4 weights are READ-ONLY (frozen; the swap only copies them to
+# GPU and discards them), so they can live in a memory-mapped file instead. The
+# OS then keeps them cached while there is room and evicts them under pressure
+# rather than killing the process.
+#
+# ram_limit_gb = 0 lo deja apagado y el comportamiento es el de siempre.
+# ram_limit_gb = 0 keeps it off and the behaviour is unchanged.
+# =============================================================================
+
+_SPILL = {
+    "map": None, "path": None, "offset": 0, "size": 0, "dir": None,
+    "file_gb": 0.0, "armed": False, "base_used": None,
+    "ram_limit": 0, "ram_used": 0, "ram_blocks": 0, "disk_blocks": 0,
+}
+
+
+def spill_active():
+    """Configurado (no implica que el fichero exista ya). / Configured."""
+    return _SPILL["armed"]
+
+
+def _system_ram_used_gb():
+    """RAM del SISTEMA en uso, en GB.
+
+    Es la metrica correcta para esta decision. El RSS del proceso no vale: en
+    Windows el working set lo recorta el SO continuamente, y ademas los pesos
+    NF4 aparcados pueden estar respaldados por el fichero del checkpoint, en
+    cuyo caso no cuentan como memoria privada del proceso aunque ocupen RAM.
+    Lo que de verdad importa es si la MAQUINA se esta quedando sin memoria.
+
+    System RAM in use, in GB. The right metric here: the process RSS is useless
+    because Windows trims the working set constantly, and the parked NF4 weights
+    may be file-backed, so they do not show as private memory even though they
+    occupy RAM. What matters is whether the MACHINE is running out.
+    """
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return (vm.total - vm.available) / (1024.0 ** 3)
+    except Exception:
+        return None
+
+
+def spill_init(ram_limit_gb, out_dir, file_gb=20.0):
+    """Arma el spill. El fichero NO se crea hasta que hace falta de verdad.
+
+    ram_limit_gb es el techo de RAM del SISTEMA, no del proceso: es lo que el
+    usuario puede comprobar en el Administrador de tareas.
+
+    Arms the spill. The file is NOT created until it is actually needed.
+    ram_limit_gb is a SYSTEM RAM ceiling, not a process one: it is what the user
+    can check in Task Manager.
+    """
+    if PARK_MODE == "ram":
+        return False
+    if PARK_MODE != "disk" and (ram_limit_gb is None or float(ram_limit_gb) <= 0):
+        return False
+
+    _SPILL.update({
+        "map": None, "path": None, "offset": 0, "size": 0,
+        "dir": out_dir or ".", "file_gb": float(file_gb),
+        "ram_limit": float(ram_limit_gb),
+        "ram_used": 0, "ram_blocks": 0, "disk_blocks": 0, "armed": True,
+        "base_used": None,
+    })
+    if PARK_MODE == "disk":
+        log_print("[SPILL] ON | mode DISK: every parked block goes to the mapped "
+                  "file. / modo DISCO: todos los bloques aparcados van al fichero "
+                  "mapeado.", flush=True)
+        return True
+
+    used = _system_ram_used_gb()
+    log_print("[SPILL] ON | system RAM ceiling: {:.1f} GB (now at {:.1f} GB). The "
+              "spill file is only created if a block does not fit. / Techo de RAM "
+              "del sistema: {:.1f} GB (ahora en {:.1f} GB). El fichero de spill "
+              "solo se crea si algun bloque no cabe.".format(
+                  float(ram_limit_gb), used or 0.0,
+                  float(ram_limit_gb), used or 0.0), flush=True)
+    return True
+
+
+def _spill_open():
+    """Crea y mapea el fichero la primera vez que hace falta de verdad."""
+    if _SPILL["map"] is not None:
+        return True
+    try:
+        os.makedirs(_SPILL["dir"], exist_ok=True)
+        path = os.path.join(_SPILL["dir"], "nf4_park_spill.bin")
+        size = int(_SPILL["file_gb"] * (1024 ** 3))
+
+        # Sin sitio no se puede: mejor seguir en RAM que reventar a mitad del
+        # aparcado. Pedimos 1 GB extra de margen para no dejar el disco a cero.
+        # No room means no spill: better to stay in RAM than to blow up halfway
+        # through parking. We ask for 1 GB of slack so the disk is not left dry.
+        free = shutil.disk_usage(_SPILL["dir"]).free
+        if free < size + (1024 ** 3):
+            log_print("[SPILL] Not enough free space on {}: {:.1f} GB free, "
+                      "{:.1f} GB needed. Staying in RAM. / No hay espacio libre "
+                      "en {}: {:.1f} GB libres, hacen falta {:.1f} GB. Todo se "
+                      "queda en RAM.".format(
+                          _SPILL["dir"], free / 1024 ** 3,
+                          (size + 1024 ** 3) / 1024 ** 3,
+                          _SPILL["dir"], free / 1024 ** 3,
+                          (size + 1024 ** 3) / 1024 ** 3), flush=True)
+            _SPILL["armed"] = False
+            return False
+        with open(path, "wb") as fh:
+            fh.truncate(size)
+        _SPILL["map"] = torch.from_file(path, shared=True, size=size,
+                                        dtype=torch.uint8)
+        _SPILL["path"] = path
+        _SPILL["size"] = size
+    except Exception as e:
+        log_print("[SPILL] Could not create the spill file, everything stays in "
+                  "RAM: {} / No se pudo crear el fichero de spill, todo se queda "
+                  "en RAM: {}".format(e, e), flush=True)
+        _SPILL["armed"] = False
+        return False
+
+    log_print("[SPILL] Spill file created: {} ({:.1f} GB) / Fichero de spill "
+              "creado: {} ({:.1f} GB)".format(
+                  _SPILL["path"], _SPILL["file_gb"],
+                  _SPILL["path"], _SPILL["file_gb"]), flush=True)
+    return True
+
+
+def spill_write(t):
+    """Copia t al fichero mapeado y devuelve una vista con los mismos bytes."""
+    t = t.detach().contiguous()
+    nbytes = t.numel() * t.element_size()
+    off = (_SPILL["offset"] + 63) & ~63          # alineado a 64 B / 64 B aligned
+    if off + nbytes > _SPILL["size"]:
+        raise RuntimeError("spill file full / fichero de spill lleno")
+
+    flat = t.reshape(-1)
+    if flat.dtype != torch.uint8:
+        flat = flat.view(torch.uint8)
+    _SPILL["map"][off:off + nbytes].copy_(flat)
+    _SPILL["offset"] = off + nbytes
+    return _SPILL["map"][off:off + nbytes].view(t.dtype).reshape(t.shape)
+
+
+# Cuanto crece la RAM del proceso DESPUES de aparcar, sin contar los bloques
+# aparcados: buffers de torch, contexto CUDA, workspaces de cuBLAS. Medido en
+# vivo: al aparcar el proceso estaba en 1,6 GiB y en meseta llega a 17,5 GiB con
+# 5,6 GiB de bloques, o sea ~10,3 GiB de crecimiento. Hay que sumarlo, porque en
+# el momento de decidir todavia no se ha gastado.
+#
+# How much process RAM grows AFTER parking, excluding the parked blocks: torch
+# buffers, the CUDA context, cuBLAS workspaces. Measured live: 1.6 GiB at park
+# time, 17.5 GiB at plateau with 5.6 GiB of blocks -> ~10.3 GiB of growth. It
+# must be added, because at decision time it has not been spent yet.
+POST_PARK_RAM_GROWTH_GIB = 10.3
+
+
+def spill_park_block(linear_modules):
+    """Decide si este bloque se queda en RAM o va al fichero mapeado.
+
+    En modo "auto" proyecta el consumo FINAL en vez de mirar el actual: cuando
+    se aparca, el proceso solo ha gastado una fraccion de lo que gastara en
+    meseta, asi que mirar el momento presente nunca dispararia el techo.
+
+    In "auto" mode it projects the FINAL usage instead of reading the current
+    one: at park time the process has spent only a fraction of what it will use
+    at plateau, so looking at the present moment would never trip the ceiling.
+    """
+    if not spill_active():
+        return False
+
+    nbytes = sum(m.weight.numel() * m.weight.element_size()
+                 for m in linear_modules if m.weight is not None)
+
+    if PARK_MODE != "disk":
+        if _SPILL["base_used"] is None:
+            _SPILL["base_used"] = _system_ram_used_gb()
+
+        projected = _SPILL["base_used"]
+        if projected is None:
+            # Sin psutil no podemos proyectar nada: mejor no tocar el disco.
+            # Without psutil we cannot project: better not to touch the disk.
+            _SPILL["ram_used"] += nbytes
+            _SPILL["ram_blocks"] += 1
+            return False
+
+        projected += (POST_PARK_RAM_GROWTH_GIB
+                      + (_SPILL["ram_used"] + nbytes) / (1024.0 ** 3))
+
+        if projected <= _SPILL["ram_limit"]:
+            _SPILL["ram_used"] += nbytes
+            _SPILL["ram_blocks"] += 1
+            return False
+
+    if not _spill_open():
+        return False
+
+    for m in linear_modules:
+        if m.weight is None or m.weight.device.type != "cpu":
+            continue
+        try:
+            view = spill_write(m.weight.data)
+        except Exception as e:
+            log_print("[SPILL] Write failed, this block stays in RAM: {} / "
+                      "Fallo al escribir, este bloque se queda en RAM: "
+                      "{}".format(e, e), flush=True)
+            return False
+        m.weight.data = view
+        m._nf4_disk_view = view
+
+    _SPILL["disk_blocks"] += 1
+    return True
+
+
+def spill_cleanup():
+    """Suelta el mapeo y borra el fichero. El spill no sobrevive a la ejecucion:
+    son ~13 GB de disco que no sirven para nada una vez terminado.
+
+    Releases the mapping and deletes the file. The spill does not outlive the
+    run: it is ~13 GB of disk that is useless once training is over."""
+    path = _SPILL.get("path")
+    _SPILL["map"] = None
+    _SPILL["path"] = None
+    _SPILL["armed"] = False
+    if not path:
+        return
+    for _ in range(3):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+            return
+        except Exception:
+            import time as _t
+            _t.sleep(0.5)      # Windows tarda en soltar el mapeo / mapping lag
+    log_print("[SPILL] Could not delete {}, remove it by hand. / No se pudo "
+              "borrar {}, borralo a mano.".format(path, path), flush=True)
+
+
+def spill_report():
+    if not spill_active():
+        return
+    used = _system_ram_used_gb() or 0.0
+    rss = _ram_rss_gb() or 0.0
+    log_print("[SPILL] Parked blocks: {} in RAM ({:.2f} GB), {} on disk "
+              "({:.2f} GB). System RAM {:.1f} GB / ceiling {:.1f} GB "
+              "(process RSS {:.1f} GB). / Bloques aparcados: {} en RAM "
+              "({:.2f} GB), {} en disco ({:.2f} GB). RAM del sistema {:.1f} GB "
+              "/ techo {:.1f} GB (RSS del proceso {:.1f} GB).".format(
+                  _SPILL["ram_blocks"], _SPILL["ram_used"] / 1024 ** 3,
+                  _SPILL["disk_blocks"], _SPILL["offset"] / 1024 ** 3,
+                  used, _SPILL["ram_limit"], rss,
+                  _SPILL["ram_blocks"], _SPILL["ram_used"] / 1024 ** 3,
+                  _SPILL["disk_blocks"], _SPILL["offset"] / 1024 ** 3,
+                  used, _SPILL["ram_limit"], rss),
+              flush=True)
+
+
+def _move_params4bit_to_device(p, device, disk_view=None):
     """
     Mueve un Params4bit sin permitir que bitsandbytes materialice el peso
     cuantizado como FP32 al hacer .to("cpu").
@@ -4017,7 +4321,16 @@ def _move_params4bit_to_device(p, device):
 
         # Copiamos únicamente la representación que realmente está
         # almacenada en Params4bit. No hacemos ninguna dequantización.
-        cpu_data = old_data.detach().to(device="cpu")
+        if disk_view is not None:
+            # Bloque respaldado en fichero: reutilizamos la vista mapeada en vez
+            # de copiar a RAM anonima. Los pesos NF4 estan congelados, asi que
+            # los bytes del fichero siguen siendo validos. Ademas ahorra la copia.
+            # File-backed block: reuse the mapped view instead of copying into
+            # anonymous RAM. The NF4 weights are frozen, so the bytes on file are
+            # still valid. It also saves the copy.
+            cpu_data = disk_view
+        else:
+            cpu_data = old_data.detach().to(device="cpu")
 
         try:
             new_p = Params4bit(
@@ -4103,7 +4416,37 @@ def _move_linear4bit_to_device(module, device):
 
     if module.weight is not None and module.weight.device.type != device:
         old_weight = module.weight
-        new_weight = _move_params4bit_to_device(old_weight, device)
+
+        # ------------------------------------------------------------------
+        # La ruta original tiraba el tensor CPU al subir el bloque a la GPU, asi
+        # que al bajarlo habia que rehacerlo con una copia D2H de ~0,28 GiB mas
+        # una reserva nueva. Con 47 bloques swapeados y dos pasadas por paso son
+        # 94 descargas: ~26 GB de PCIe y 94 ciclos de reservar/liberar 287 MB.
+        #
+        # Los pesos NF4 estan CONGELADOS: los bytes que ya hay en CPU siguen
+        # siendo validos siempre. Guardamos esa copia ("home") y la reutilizamos
+        # al volver. Medido: 16,58 -> 9,61 s/it y 51 -> 31 GB de RAM.
+        #
+        # The original path dropped the CPU tensor when uploading a block, so
+        # coming back needed a ~0.28 GiB D2H copy plus a fresh allocation. With
+        # 47 swapped blocks and two passes per step that is 94 downloads: ~26 GB
+        # of PCIe traffic and 94 allocate/free cycles of 287 MB.
+        #
+        # The NF4 weights are FROZEN: the bytes already in CPU stay valid
+        # forever. We keep that copy ("home") and reuse it on the way back.
+        # ------------------------------------------------------------------
+        if NF4_CPU_HOME and device == "cuda" and old_weight.device.type == "cpu":
+            if getattr(module, "_nf4_cpu_home", None) is None:
+                module._nf4_cpu_home = old_weight.data
+
+        home = getattr(module, "_nf4_disk_view", None)
+        if home is None and NF4_CPU_HOME:
+            home = getattr(module, "_nf4_cpu_home", None)
+
+        new_weight = _move_params4bit_to_device(
+            old_weight, device,
+            disk_view=(home if device == "cpu" else None),
+        )
         module.weight = new_weight
         del old_weight
 
@@ -4190,6 +4533,8 @@ def park_nf4_block(block):
     # El bloque queda en estado CPU persistente: no se conserva una copia
     # CUDA del NF4 mientras está aparcado. Los módulos se reconstruyen en CUDA
     # solo durante el forward/backward y vuelven inmediatamente a CPU.
+    spill_park_block(linear_modules)
+
     block._nf4_swap_modules = linear_modules
     block._nf4_swap_grad_enabled = False
     block._nf4_swap_persistent_cpu = True
@@ -4756,6 +5101,20 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
         flush=True,
     )
 
+    # El spill tiene que estar listo ANTES de aparcar el primer bloque.
+    # The spill must be ready BEFORE the first block is parked.
+    # Dimensionamos el fichero por lo que ocupan de verdad los bloques NF4:
+    # reservar 20 GB fijos gastaria disco para nada.
+    # Size the file by what the NF4 blocks actually take: a fixed 20 GB
+    # reservation would waste disk for nothing.
+    try:
+        _spill_gb = (get_block_nf4_bytes(block_list[0])
+                     * max(n_blocks - start_index, 1) / (1024.0 ** 3) * 1.05)
+    except Exception:
+        _spill_gb = 20.0
+    spill_init(RAM_LIMIT_GB, PARK_DISK_DIR or OUTPUT_DIR, file_gb=_spill_gb)
+    atexit.register(spill_cleanup)
+
     moved = 0
 
     for i in range(start_index):
@@ -4895,6 +5254,7 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
     )
 
     free_vram()
+    spill_report()
     vram_stats("Post VRAM plan")
 
     return {
