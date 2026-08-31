@@ -82,8 +82,8 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 - **🖼️ In-training previews** — every N steps the current LoRA generates an image, shown live in the gallery. `0` disables it completely.
 - **🎬 Real joint sampling** — the preview runs the actual packed `[text | audio | video]` sequence with two independent sigma schedules and per-row timesteps, which is the layout the model was trained on.
 - **🗣️ Four prompt modes** — *First* (comparable across steps), *Random* (varied), *Rotate* (covers the dataset), *Custom* (a free prompt, encoded by the pre-cache).
-- **🎚️ Sampler control** — MiniMax-H3 ships exactly one sampler (rectified-flow Euler, `eta = 0`); its sigma shift is the only real knob and is exposed with sensible presets.
 - **💾 VAE on CPU or CUDA** — the VAE decoder is ~2.4 G parameters (4.8 GB in bf16). On CPU it costs ~90 s and touches no VRAM; on a 24 GB+ card, CUDA takes seconds.
+  The previews are of very poor quality and the generation times are long; it is recommended to activate it only on GPUs with a lot of VRAM.
 
 ### Dataset Manager
 - **🖼️ Visual grid & caption editor** — caption status badges (🟢 present / 🔴 missing), filename overlays, a lightbox to edit `.txt` captions directly on disk, and a batch tool to inject trigger words.
