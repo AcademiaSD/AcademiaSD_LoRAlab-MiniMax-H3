@@ -66,6 +66,7 @@ LOGO_FILE = ASSETS_DIR / "logo.png" if (ASSETS_DIR / "logo.png").exists() else B
 PRECACHE_CONFIG = BASE_DIR / "pre_cache_settings.json"
 TRAIN_CONFIG = BASE_DIR / "train_settings.json"
 HF_TOKEN_CONFIG = BASE_DIR / "HF_token.json"
+CAPTION_SCRIPT = BASE_DIR / "0_caption_MiniMaxH3.py"
 PRECACHE_SCRIPT = BASE_DIR / "1_pre_cache_MiniMaxH3.py"
 TRAIN_SCRIPT = BASE_DIR / "2_train_lora_MiniMaxH3.py"
 
@@ -141,6 +142,8 @@ def get_dataset_dir():
 
 
 def get_script_for_name(script_name):
+    if script_name == "caption":
+        return CAPTION_SCRIPT
     if script_name == "precache":
         return PRECACHE_SCRIPT
     if script_name == "train":
@@ -461,6 +464,77 @@ def api_status():
     return jsonify(get_status())
 
 
+@app.route("/api/cache-info", methods=["GET"])
+def cache_info():
+    """Datos de la cache que necesita el calculo automatico de VRAM.
+
+    El pico de VRAM lo marca la secuencia MAS LARGA del dataset, no la media:
+    devuelve el maximo de tokens de texto y la geometria del latente. Si la
+    cache no existe todavia, devuelve available=False y la interfaz usa
+    max_seq_len como peor caso, que es conservador.
+
+    Data the automatic VRAM calculation needs. The VRAM peak is set by the
+    LONGEST sequence in the dataset, so this returns the maximum text-token
+    count and the latent geometry. Without a cache it reports available=False
+    and the UI falls back to max_seq_len as the worst case.
+    """
+    cfg = read_json_file(PRECACHE_CONFIG, {})
+    proj = str(cfg.get("project_name", "")).strip()
+    cache_dir = BASE_DIR / ("cached_data_MiniMaxH3_" + proj if proj else "cached_data_MiniMaxH3")
+
+    out = {"available": False, "cache_dir": str(cache_dir), "images": 0,
+           "max_text_tokens": 0, "max_video_tokens": 0}
+    if not cache_dir.is_dir():
+        return jsonify(out)
+
+    max_text = 0
+    images = 0
+    for f in cache_dir.glob("*_prompt_structure.json"):
+        if f.name.startswith("_"):
+            continue
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            shape = d.get("items", {}).get("prompt_embeds", {}).get("shape")
+            if shape and len(shape) >= 2:
+                max_text = max(max_text, int(shape[1]))
+                images += 1
+        except Exception:
+            pass
+
+    # LA RESOLUCION LA MANDA LA CACHE, NO EL FORMULARIO.
+    #
+    # El entrenamiento usa los latentes ya cacheados, asi que el area que cuenta
+    # es la que se uso al construirlos, no la que haya escrita ahora en la
+    # interfaz. cache_info.json la guarda; el snapshot pre_cache_settings_*.json
+    # que el servidor deja dentro de la carpeta sirve de respaldo.
+    # THE CACHE OWNS THE RESOLUTION, not the form: training uses the latents that
+    # are already cached, so the area that matters is the one they were built
+    # with. cache_info.json records it.
+    cached_area = 0
+    for candidate in [cache_dir / "cache_info.json"] + sorted(cache_dir.glob("pre_cache_settings_*.json")):
+        try:
+            d = json.loads(candidate.read_text(encoding="utf-8"))
+            area = int(d.get("target_area", 0) or 0)
+            if area > 0:
+                cached_area = area
+                break
+        except Exception:
+            pass
+
+    # El bucket apunta a un area constante, asi que los tokens de video son
+    # area / (16 del VAE * 2 del patch)^2 = area / 1024, sea cual sea el aspecto.
+    # The bucket targets a constant area, so video tokens are area / 1024
+    # whatever the aspect ratio.
+    max_video = int(cached_area / 1024) if cached_area > 0 else 0
+
+    if images:
+        out.update({"available": True, "images": images,
+                    "max_text_tokens": max_text, "max_video_tokens": max_video,
+                    "cached_target_area": cached_area,
+                    "form_target_area": int(cfg.get("target_area", 0) or 0)})
+    return jsonify(out)
+
+
 @app.route("/api/checkpoint-info", methods=["GET"])
 def checkpoint_info():
     output_dir = get_train_output_dir()
@@ -776,6 +850,141 @@ def batch_caption():
         return jsonify({"status": "ok", "updated_count": count})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+def _get_precache_dir():
+    cfg = read_json_file(PRECACHE_CONFIG, {})
+    proj = str(cfg.get("project_name", "")).strip()
+    if proj:
+        return resolve_config_path("cached_data_MiniMaxH3_{}".format(proj), "./cached_data_MiniMaxH3")
+    return resolve_config_path(cfg.get("cache_dir"), "./cached_data_MiniMaxH3")
+
+
+def _wipe_dir(path):
+    """Vacia una carpeta sin borrarla. Devuelve (borrados, errores).
+
+    Se borra el CONTENIDO y no la carpeta en si: las rutas estan guardadas en
+    los JSON de configuracion y en la GUI, y una carpeta que desaparece obliga
+    al usuario a volver a elegirla.
+
+    Empties a folder without removing it. The CONTENT goes, not the folder
+    itself: the paths live in the config JSONs and in the GUI, and a folder that
+    vanishes forces the user to pick it again.
+    """
+    removed, errors = 0, []
+    if not path.is_dir():
+        return removed, errors
+    for entry in path.iterdir():
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+            removed += 1
+        except Exception as exc:
+            errors.append("{}: {}".format(entry.name, exc))
+    return removed, errors
+
+
+@app.route("/api/delete-project-data", methods=["POST"])
+def delete_project_data():
+    """Vacia la pre-cache o la salida de entrenamiento del proyecto actual."""
+    try:
+        target = str(request.get_json(force=True).get("target", "")).strip().lower()
+        if target == "precache":
+            path = _get_precache_dir()
+        elif target == "training":
+            path = get_train_output_dir()
+        else:
+            return jsonify({"status": "error",
+                            "error": "Unknown target / destino desconocido: {}".format(target)}), 400
+
+        # Un proceso en marcha tiene ficheros abiertos: borrar por debajo deja
+        # el entrenamiento escribiendo en un checkpoint que ya no existe.
+        # A running process holds open files; deleting underneath it leaves the
+        # trainer writing into a checkpoint that is no longer there.
+        if get_status().get("running"):
+            return jsonify({"status": "error",
+                            "error": "A process is running. Stop it first. / "
+                                     "Hay un proceso en marcha. Detenlo primero."}), 409
+
+        if not path.is_dir():
+            return jsonify({"status": "ok", "removed": 0, "path": str(path),
+                            "message": "Nothing to delete / No habia nada que borrar"})
+
+        removed, errors = _wipe_dir(path)
+        return jsonify({"status": "ok" if not errors else "partial",
+                        "removed": removed, "errors": errors, "path": str(path)})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/api/delete-dataset-image", methods=["POST"])
+def delete_dataset_image():
+    """Borra una imagen del dataset y su .txt."""
+    try:
+        filename = str(request.get_json(force=True).get("file", "")).strip()
+        if not filename:
+            return jsonify({"status": "error", "error": "No file / sin fichero"}), 400
+
+        dataset_dir = get_dataset_dir()
+        target = (dataset_dir / filename).resolve()
+
+        # El nombre viene del navegador: hay que confirmar que sigue dentro del
+        # dataset antes de borrar nada.
+        # The name comes from the browser: confirm it is still inside the dataset
+        # before deleting anything.
+        if dataset_dir.resolve() not in target.parents:
+            return jsonify({"status": "error",
+                            "error": "Path outside the dataset / ruta fuera del dataset"}), 400
+        if not target.is_file():
+            return jsonify({"status": "error",
+                            "error": "Not found / no existe: {}".format(filename)}), 404
+
+        removed = []
+        target.unlink()
+        removed.append(target.name)
+        txt = target.with_suffix(".txt")
+        if txt.is_file():
+            txt.unlink()
+            removed.append(txt.name)
+
+        return jsonify({"status": "ok", "removed": removed})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/api/save-caption-settings", methods=["POST"])
+def save_caption_settings():
+    """Guarda caption_settings.json.
+
+    Ojo: no confundir con /api/save-caption-text, que escribe el .txt de UNA
+    imagen. Este guarda los AJUSTES del auto-captioning.
+    Not to be confused with the per-image caption endpoint: this saves the
+    auto-captioning SETTINGS.
+    """
+    try:
+        data = request.get_json(force=True)
+        path = BASE_DIR / "caption_settings.json"
+
+        # Se FUSIONA, no se reemplaza: la GUI solo manda el prompt y el modo, y
+        # un write completo borraria max_new_tokens y max_image_side cada vez
+        # que se pulsa el boton, descartando en silencio lo que el usuario haya
+        # ajustado a mano en el JSON.
+        # MERGED, not replaced: the GUI only sends the prompt and the mode, and a
+        # full write would wipe max_new_tokens and max_image_side on every click,
+        # silently discarding whatever the user tuned by hand in the JSON.
+        merged = read_json_file(path, {})
+        merged.update(data)
+        write_json_file(path, merged)
+        return jsonify({"status": "ok"})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/api/caption-settings", methods=["GET"])
+def get_caption_settings():
+    return jsonify(read_json_file(BASE_DIR / "caption_settings.json", {}))
 
 
 def open_browser():

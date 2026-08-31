@@ -127,7 +127,7 @@ DEFAULTS = {
     # grad_accum=1 -> cada micro-paso es un update: 2x updates por el mismo tiempo.
     # At 20 s/it wall time is set by total_steps, not grad_accum. accum=1 doubles
     # the number of updates for the same number of seconds.
-    "total_steps": 500,
+    "total_steps": 600,
     "batch_size": 1,
     "grad_accum_steps": 1,
 
@@ -149,8 +149,8 @@ DEFAULTS = {
     # rank 8 es poco para clavar una identidad en un DiT de 33B: el detalle facial
     # necesita subespacio. 16 es el punto dulce; 32 si sobra VRAM.
     # rank 8 is thin for identity in a 33B DiT; 16 is the sweet spot, 32 if VRAM allows.
-    "lora_rank": 16,
-    "lora_alpha": 16,
+    "lora_rank": 8,
+    "lora_alpha": 8,
     "weight_decay": 0.0,
 
     # --- Optimizador --------------------------------------------------------
@@ -6384,8 +6384,49 @@ def _ensure_train_runtime():
         log_print("[CACHE] Runtime previo incompatible con la configuración actual. Reiniciando.", flush=True)
         reset_train_runtime(clear_memory=False)
 
-    if not os.path.exists(CACHE_DIR):
-        raise RuntimeError("No existe cache: {}.".format(CACHE_DIR))
+    # ------------------------------------------------------------------
+    # La pre-cache se valida ANTES de tocar el modelo. Cargar 39 GB de NF4 para
+    # despues descubrir que no hay latentes cuesta varios minutos y suelta un
+    # error enorme que no dice lo unico que importa: que falta la pre-cache.
+    # No basta con que exista la carpeta: una pre-cache interrumpida deja el
+    # directorio creado y vacio, y ese caso pasaba el filtro.
+    #
+    # The pre-cache is validated BEFORE touching the model. Loading 39 GB of NF4
+    # only to find there are no latents costs minutes and throws a huge error
+    # that hides the one thing that matters: the pre-cache is missing. Checking
+    # that the folder exists is not enough — an interrupted pre-cache leaves it
+    # created and empty, and that case used to slip through.
+    # ------------------------------------------------------------------
+    _latents = []
+    if os.path.isdir(CACHE_DIR):
+        try:
+            _latents = [f for f in os.listdir(CACHE_DIR)
+                        if f.endswith("_video_latent.pt")]
+        except Exception:
+            _latents = []
+
+    if not _latents:
+        _why = ("the folder does not exist / la carpeta no existe"
+                if not os.path.isdir(CACHE_DIR)
+                else "the folder is empty or has no latents / la carpeta esta "
+                     "vacia o no tiene latentes")
+        raise RuntimeError(
+            "\n"
+            "================================================================\n"
+            "  NO PRE-CACHE FOR THIS PROJECT / NO HAY PRE-CACHE DE ESTE PROYECTO\n"
+            "================================================================\n"
+            "  Folder / Carpeta : {}\n"
+            "  Reason / Motivo  : {}\n"
+            "\n"
+            "  Run step 1 (Pre-Cache) before training. Training has no text\n"
+            "  encoder and no VAE by design: every embedding and latent must\n"
+            "  be computed beforehand.\n"
+            "\n"
+            "  Ejecuta primero el paso 1 (Pre-Cache). El entrenamiento no lleva\n"
+            "  text encoder ni VAE por diseno: todos los embeddings y latentes\n"
+            "  tienen que calcularse antes.\n"
+            "================================================================\n"
+            .format(os.path.abspath(CACHE_DIR), _why))
 
     if not os.path.isdir(NF4_CACHE_DIR):
         raise FileNotFoundError(
@@ -6930,13 +6971,12 @@ def hot_reload_live_settings():
         if new_total != TOTAL_STEPS:
             if new_total > TOTAL_STEPS:
                 changes.append(
-                    "total_steps: {} -> {} IGNORADO en caliente (el rango del bucle ya "
-                    "esta fijado; para ampliar: Stop -> Start/Resume) / IGNORED live; "
-                    "use Stop -> Start/Resume to extend".format(TOTAL_STEPS, new_total))
+                    "total_steps: {} -> {} (la corrida se amplia) / the run is "
+                    "extended".format(TOTAL_STEPS, new_total))
             else:
                 changes.append("total_steps: {} -> {} (la corrida terminara antes) / the "
                                "run will finish earlier".format(TOTAL_STEPS, new_total))
-                TOTAL_STEPS = new_total
+            TOTAL_STEPS = new_total
 
     return changes
 
@@ -7529,8 +7569,28 @@ def train_minimaxh3():
     except Exception:
         pass
 
+    def _steps_from(start):
+        """Genera los pasos leyendo TOTAL_STEPS en CADA iteracion.
+
+        Con range(start, TOTAL_STEPS+1) el limite queda congelado al entrar en el
+        bucle, asi que subir los pasos en caliente no tenia ningun efecto. Un
+        generador lo vuelve a leer cada vez, de modo que ampliar la corrida desde
+        la GUI funciona igual que acortarla.
+
+        Yields steps re-reading TOTAL_STEPS on EVERY iteration. With a range() the
+        limit is frozen when the loop starts, so raising the step count live did
+        nothing; a generator re-reads it, making "extend the run" work like
+        "shorten the run" already did.
+        """
+        s = start
+        while True:
+            s += 1
+            if s > TOTAL_STEPS:
+                return
+            yield s
+
     try:
-        for step in range(start_step + 1, TOTAL_STEPS + 1):
+        for step in _steps_from(start_step):
             if STOP_REQUESTED:
                 log_print("[STOP] Stopping on request / Deteniendo por solicitud de "
                           "parada.", flush=True)

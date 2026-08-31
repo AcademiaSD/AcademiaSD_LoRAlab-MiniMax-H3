@@ -403,10 +403,18 @@ DEFAULTS = {
     "nf4_model_id": "./MiniMax-H3-NF4",
     "dataset_path": "./dataset",
     "cache_dir": "./cached_data_minimaxh3_v3",
-    "target_area": 768 * 768,
+    "target_area": 512 * 512,
     "max_side": 1024,
     "multiple": 32,
-    "max_seq_len": 192,
+    # Tokens de texto por caption. 100 son unas 75 palabras: de sobra para
+    # un caption de dataset, y cada token cuesta VRAM en cada paso de
+    # entrenamiento porque va en la secuencia empaquetada. Lo que pase de
+    # aqui se trunca, asi que no tiene sentido generar captions mas largos.
+    # Text tokens per caption. 100 is about 75 words: plenty for a dataset
+    # caption, and every token costs VRAM on every training step because it
+    # travels in the packed sequence. Anything past this is truncated, so
+    # generating longer captions is pointless.
+    "max_seq_len": 100,
     "frame_rate": 24.0,
     "num_frames": 17,
     "project_name": "",
@@ -1596,9 +1604,25 @@ def verify_language_weights(model):
     return checks
 
 
-def load_text_encoder_from_nf4(nf4_model_id, original_model_id):
+def load_text_encoder_from_nf4(nf4_model_id, original_model_id, full_model=False):
     """Load the Qwen3-VL text encoder from the NF4 export.
-    Carga el text encoder Qwen3-VL desde el export NF4."""
+    Carga el text encoder Qwen3-VL desde el export NF4.
+
+    full_model=False (por defecto) da el modelo que necesita el pre-cache: el
+    decoder truncado en TEXT_ENCODER_HIDDEN_LAYER y la lm_head sustituida por
+    Identity, porque H3 solo consume hidden_states[50] y la cabeza son ~3,1 GB
+    de peso muerto.
+
+    full_model=True da el modelo COMPLETO, con sus 64 capas y su lm_head real.
+    Hace falta para generar texto (el auto-captioning): un modelo truncado y sin
+    cabeza no puede producir un solo token. El repo NF4 conserva ambas cosas.
+
+    full_model=False (default) yields what the pre-cache needs: the decoder
+    truncated at TEXT_ENCODER_HIDDEN_LAYER and lm_head replaced by Identity,
+    since H3 only consumes hidden_states[50] and the head is ~3.1 GB of dead
+    weight. full_model=True yields the COMPLETE model, all 64 layers and the real
+    lm_head, which is what generating text (auto-captioning) requires: a
+    truncated, headless model cannot emit a single token."""
     from bitsandbytes.nn import Linear4bit, Params4bit
 
     nf4_te_dir = os.path.join(nf4_model_id, "text_encoder")
@@ -1666,10 +1690,15 @@ def load_text_encoder_from_nf4(nf4_model_id, original_model_id):
               "crearia capas sin inicializar y arruinaria el condicionamiento.")
             .format(original_layers, TEXT_ENCODER_HIDDEN_LAYER))
 
-    target.num_hidden_layers = TEXT_ENCODER_HIDDEN_LAYER
-    log_dev(L("[NF4-TE] Decoder truncated: {} -> {} layers (only hidden_states[{}] is consumed).",
-              "[NF4-TE] Decoder truncado: {} -> {} capas (solo se consume hidden_states[{}]).")
-            .format(original_layers, TEXT_ENCODER_HIDDEN_LAYER, TEXT_ENCODER_HIDDEN_LAYER))
+    if full_model:
+        log_dev(L("[NF4-TE] FULL model: {} layers kept, lm_head kept (text generation).",
+                  "[NF4-TE] Modelo COMPLETO: {} capas y lm_head conservadas (generacion de texto).")
+                .format(original_layers))
+    else:
+        target.num_hidden_layers = TEXT_ENCODER_HIDDEN_LAYER
+        log_dev(L("[NF4-TE] Decoder truncated: {} -> {} layers (only hidden_states[{}] is consumed).",
+                  "[NF4-TE] Decoder truncado: {} -> {} capas (solo se consume hidden_states[{}]).")
+                .format(original_layers, TEXT_ENCODER_HIDDEN_LAYER, TEXT_ENCODER_HIDDEN_LAYER))
 
     architectures = getattr(te_config, "architectures", []) or []
     model_cls = None
@@ -1698,6 +1727,10 @@ def load_text_encoder_from_nf4(nf4_model_id, original_model_id):
         Si se deja, se rellena con ceros y se sube a la GPU: hasta ~3,1 GB de VRAM para
         nada. nn.Identity mantiene funcionando el forward del wrapper igualmente.
         """
+        if full_model:
+            # Con el modelo completo la cabeza es justo lo que hace falta.
+            # With the full model the head is exactly what is needed.
+            return 0
         head = getattr(te, "lm_head", None)
         if head is None or isinstance(head, nn.Identity):
             return 0
@@ -1938,7 +1971,12 @@ def load_text_encoder_from_nf4(nf4_model_id, original_model_id):
                 text_encoder, nf4_te_dir,
                 repo_id=MISSING_TENSORS_REPO,
                 subfolders=MISSING_TENSORS_SUBFOLDERS,
-                max_layer=TEXT_ENCODER_HIDDEN_LAYER,
+                # Con el modelo completo hay que rellenar TODAS las capas, no
+                # solo hasta la 50: las normas de las capas 50-63 tambien hacen
+                # falta para generar. Son unos cientos de KB.
+                # With the full model every layer must be backfilled, not just up
+                # to 50: the norms of layers 50-63 are needed to generate too.
+                max_layer=(original_layers if full_model else TEXT_ENCODER_HIDDEN_LAYER),
             )
         else:
             diag_error(L("fetch_missing_from_hub is disabled, so the encoder cannot be completed.",

@@ -99,6 +99,11 @@
         .terminal-line.term-danger { color: #ef4444; font-weight: bold; }
 
         .ds-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+        .ds-caption-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                           padding: 8px 0 10px 0; border-bottom: 1px solid var(--panel-border); margin-bottom: 10px; }
+        .ds-caption-bar .ds-search { min-width: 220px; }
+        .ds-inline-label { display: flex; align-items: center; gap: 5px; font-size: 0.74rem;
+                           color: var(--text-muted); white-space: nowrap; cursor: pointer; }
         .ds-search { flex: 1; min-width: 150px; background: #0f172a; border: 1px solid var(--panel-border); color: #fff; padding: 6px 10px; border-radius: 6px; font-size: 0.8rem; }
         .ds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; max-height: 380px; overflow-y: auto; padding-right: 5px; }
         .ds-grid.compact { grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); }
@@ -113,6 +118,11 @@
         .ds-grid.large .img-wrapper { height: 165px; }
         .img-wrapper img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+        .ds-del { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border: none;
+                  border-radius: 5px; background: rgba(15,23,42,0.82); color: #fca5a5; font-size: 0.82rem;
+                  line-height: 1; cursor: pointer; z-index: 3; opacity: 0; transition: opacity 0.15s, background 0.15s; }
+        .ds-card:hover .ds-del { opacity: 1; }
+        .ds-del:hover { background: var(--danger); color: #fff; }
         .caption-dot { position: absolute; top: 6px; right: 6px; width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid #0f172a; box-shadow: 0 0 5px rgba(0,0,0,0.8); z-index: 2; }
         .dot-green { background-color: var(--success); }
         .dot-red { background-color: var(--danger); }
@@ -247,13 +257,13 @@
                         <label>Resolution / Resolución (px²):</label>
                         <select id="target_area_select" onchange="syncResolution(this.value)">
 							<option value="200704">448 x 448 (200,704 px²)</option>
-                            <option value="262144">512 x 512 (262,144 px²)</option>
+                            <option value="262144" selected>512 x 512 (262,144 px²)</option>
 							<option value="331776">576 x 576 (331,776 px²)</option>
-                            <option value="589824" selected>768 x 768 (589,824 px²)</option>
+                            <option value="589824">768 x 768 (589,824 px²)</option>
                             <option value="1048576">1024 x 1024 (1,048,576 px²)</option>
                             <option value="custom">Custom / Personalizada</option>
                         </select>
-                        <input type="number" id="precache_target_area" value="589824" style="margin-top:6px; display:none;">
+                        <input type="number" id="precache_target_area" value="262144" style="margin-top:6px; display:none;">
                     </div>
 
                     <div class="form-row">
@@ -274,7 +284,7 @@
 
                     <div class="form-group">
                         <label>Max Seq Len / Long. Sec.:</label>
-                        <input type="number" id="precache_max_seq_len" value="192">
+                        <input type="number" id="precache_max_seq_len" value="100">
                     </div>
 
                     <!-- Botones Load JSON y Save JSON -->
@@ -292,6 +302,11 @@
                     <button type="button" class="btn btn-primary btn-tall btn-full" id="btn-precache" onclick="runPrecache()" style="margin-top:8px;">
                         <span class="main-text">Start Pre-Cache</span>
                         <span class="sub-text">Iniciar Pre-Caché</span>
+                    </button>
+                    <button type="button" class="btn btn-danger btn-tall btn-full" onclick="deleteProjectData('precache')" style="margin-top:8px;"
+                            title="Empties this project's pre-cache folder: latents, embeddings and cache_info.json. The dataset is NOT touched. / Vacia la carpeta de pre-cache de este proyecto: latentes, embeddings y cache_info.json. El dataset NO se toca.">
+                        <span class="main-text">Delete Pre-Cache Data</span>
+                        <span class="sub-text">Borrar Pre-Cach&eacute;</span>
                     </button>
                 </div>
             </div>
@@ -315,7 +330,7 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label>Total Steps / Pasos Totales:</label>
-                            <input type="number" id="train_total_steps" value="500">
+                            <input type="number" id="train_total_steps" value="600">
                         </div>
                         <div class="form-group">
                             <label>Learning Rate / LR:</label>
@@ -326,11 +341,11 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label>LoRA Rank (R):</label>
-                            <input type="number" id="train_lora_rank" value="16">
+                            <input type="number" id="train_lora_rank" value="8">
                         </div>
                         <div class="form-group">
                             <label>LoRA Alpha (A):</label>
-                            <input type="number" id="train_lora_alpha" value="16">
+                            <input type="number" id="train_lora_alpha" value="8">
                         </div>
                     </div>
 
@@ -494,7 +509,7 @@
                              0 = no limit (all in RAM, the default). -->
                         <div class="form-group">
                             <label>BLOCK SWAP STORAGE:</label>
-                            <select id="train_park_mode" title="Where the blocks that do not fit in VRAM live. Disk measured FASTER than RAM (7.43 vs 8.14 s/it) and uses less memory (26 vs ~35 GB), and those blocks become evictable so the machine degrades instead of running out. In exchange it writes ~13 GB to disk at startup and needs the free space. / Donde viven los bloques que no caben en VRAM. Disk midio MAS RAPIDO que RAM (7,43 contra 8,14 s/it) y gasta menos memoria (26 contra ~35 GB), y esos bloques pasan a ser desalojables, asi que la maquina degrada en vez de quedarse sin memoria. A cambio escribe ~13 GB al disco al arrancar y necesita ese espacio libre.">
+                            <select id="train_park_mode" title="Where the blocks that do not fit in VRAM live. RAM is the default and the right choice for almost everyone. Disk parks them in a memory-mapped file instead: same speed, but the memory becomes evictable, so a machine short on RAM degrades rather than running out. In exchange it writes up to 16 GB at startup and needs that free space. / Donde viven los bloques que no caben en VRAM. RAM es lo predeterminado y lo adecuado para casi todo el mundo. Disk los aparca en un fichero mapeado en memoria: misma velocidad, pero esa memoria pasa a ser desalojable, asi que una maquina con poca RAM degrada en vez de quedarse sin memoria. A cambio escribe hasta 16 GB al arrancar y necesita ese espacio libre.">
                                 <option value="auto" selected>Auto &mdash; RAM, y a disco lo que no quepa / RAM, spilling what does not fit</option>
                                 <option value="ram">RAM &mdash; siempre en memoria / always in memory</option>
                                 <option value="disk">Disk &mdash; siempre en fichero / always in a file</option>
@@ -556,6 +571,14 @@
                             <span class="sub-text">Detener</span>
                         </button>
                     </div>
+
+                    <div class="btn-row" style="margin-top:8px;">
+                        <button type="button" class="btn btn-danger btn-tall btn-full" onclick="deleteProjectData('training')"
+                                title="Empties this project's output folder: LoRA checkpoints, the resume point, previews and the log. The pre-cache and the dataset are NOT touched. / Vacia la carpeta de salida de este proyecto: checkpoints del LoRA, el punto de reanudacion, las previews y el log. La pre-cache y el dataset NO se tocan.">
+                            <span class="main-text">Delete Training Data</span>
+                            <span class="sub-text">Borrar Entrenamiento</span>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -588,7 +611,7 @@
             </div>
         </div>
 
-        <!-- Right Column: Terminal, Dataset Inspector & Previews -->
+        <!-- Right Column: Terminal, Dataset Manager & Previews -->
         <div class="panel console-container">
             <div class="panel-title" style="cursor:default;">
                 <span>Console Output / Terminal de Consola</span>
@@ -597,10 +620,10 @@
             
             <div class="terminal" id="terminal"></div>
 
-            <!-- Dataset Inspector -->
+            <!-- Dataset Manager -->
             <div>
                 <div class="panel-title" style="cursor:default;">
-                    <span>Dataset Inspector / Inspector (<span id="ds-count">0</span> img, <span id="ds-txt-count">0</span> txt)</span>
+                    <span>Dataset Manager / Gestor (<span id="ds-count">0</span> img, <span id="ds-txt-count">0</span> txt)</span>
                     <div class="ds-toolbar">
                         <input type="text" class="ds-search" id="ds-search" placeholder="Search / Buscar..." oninput="filterDatasetGrid()">
                         <button type="button" class="btn btn-secondary btn-sm" onclick="setGridMode('compact')">Compact / Pequeño</button>
@@ -611,6 +634,26 @@
                         <button type="button" class="btn btn-secondary btn-sm" onclick="loadDatasetInfo()">Refresh / Actualizar</button>
                     </div>
                 </div>
+
+                <!-- Auto-captioning: usa el mismo Qwen3-VL que ya trae el repo NF4,
+                     asi que no descarga ningun modelo extra. Ver 0_caption_MiniMaxH3.py.
+                     Auto-captioning reuses the Qwen3-VL already inside the NF4 repo,
+                     so it downloads no extra model. See 0_caption_MiniMaxH3.py. -->
+                <div class="ds-caption-bar">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-caption" onclick="runCaption()"
+                            title="Writes one .txt per image with Qwen3-VL-4B, putting the trigger word first. The model downloads itself the first time (~8 GB) and then loads in 4-bit, about 3 GB of VRAM, so it fits on any card from 6 GB up. It is a one-off pass over the dataset. / Escribe un .txt por imagen con Qwen3-VL-4B, poniendo la palabra trigger al principio. El modelo se descarga solo la primera vez (~8 GB) y luego carga en 4 bits, unos 3 GB de VRAM, asi que entra en cualquier tarjeta desde 6 GB. Es una pasada unica sobre el dataset.">
+                        <span id="btn-caption-label">Create Captions / Crear Captions</span>
+                    </button>
+                    <input type="text" class="ds-search" id="caption_prompt"
+                           value="Describe this image for training a text-to-video model. One single paragraph, plain prose, no lists and no preamble. Cover: the subject and what they are doing, hair and clothing, the framing and camera angle, the setting, and the lighting. Do not invent a name and do not mention that this is an image or a photo."
+                           placeholder="Prompt for the captioner / Prompt para el generador"
+                           title="What the model is asked about each image. The default aims for one plain paragraph covering subject, clothing, framing, setting and lighting. The trigger word is added separately, at the front. / Lo que se le pide al modelo sobre cada imagen. El de por defecto busca un parrafo llano con sujeto, ropa, encuadre, escenario e iluminacion. La palabra trigger se anade aparte, al principio.">
+                    <label class="ds-inline-label" title="Off = only images with no caption are processed. / Desactivado = solo se procesan las imagenes sin caption.">
+                        <input type="checkbox" id="caption_overwrite" checked>
+                        Overwrite / Rehacer
+                    </label>
+                </div>
+
                 <div class="ds-grid" id="ds-grid"></div>
             </div>
 
@@ -868,9 +911,9 @@
         // Sin cache se usa max_seq_len como peor caso, que es conservador.
         // Longest sequence in the dataset, which is what sets the peak.
         function vramSequenceTokens() {
-            const formArea = parseInt(document.getElementById('precache_target_area').value) || 589824;
+            const formArea = parseInt(document.getElementById('precache_target_area').value) || 262144;
             let area = formArea;
-            let textTokens = parseInt(document.getElementById('precache_max_seq_len').value) || 192;
+            let textTokens = parseInt(document.getElementById('precache_max_seq_len').value) || 100;
             let source = 'peor caso, sin cache / worst case, no cache';
             let stale = false;
 
@@ -1072,6 +1115,7 @@
                 }
                 updateProjectPaths();
                 loadDatasetInfo();
+                loadCaptionSettings();
             } catch (e) {}
         }
         loadSettings();
@@ -1376,6 +1420,46 @@
             }
         }
 
+        // El boton dice "Crear" o "Rehacer" segun si ya hay captions, para que
+        // se vea de un vistazo que va a pasar con el trabajo ya hecho.
+        // The button reads "Create" or "Redo" depending on whether captions already
+        // exist, so it is obvious at a glance what happens to existing work.
+        function updateCaptionButton(imageCount, captionCount) {
+            const label = document.getElementById('btn-caption-label');
+            if (!label) return;
+            label.innerText = (captionCount > 0)
+                ? 'Redo Captions / Rehacer Captions'
+                : 'Create Captions / Crear Captions';
+        }
+
+        async function loadCaptionSettings() {
+            try {
+                const res = await fetch('/api/caption-settings');
+                const data = await res.json();
+                if (data.caption_prompt) document.getElementById('caption_prompt').value = data.caption_prompt;
+                if (data.overwrite !== undefined) document.getElementById('caption_overwrite').checked = !!data.overwrite;
+            } catch (e) {}
+        }
+
+        async function runCaption() {
+            const captioned = parseInt(document.getElementById('ds-txt-count').innerText) || 0;
+            const overwrite = document.getElementById('caption_overwrite').checked;
+            if (captioned > 0 && overwrite) {
+                if (!confirm('This will OVERWRITE the ' + captioned + ' caption(s) that already exist.\n\n' +
+                             'Esto SOBRESCRIBIR\u00c1 los ' + captioned + ' caption(s) que ya existen.\n\n' +
+                             'Continue? / \u00bfContinuar?')) return;
+            }
+            const prompt = document.getElementById('caption_prompt').value.trim();
+            try {
+                await fetch('/api/save-caption-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ caption_prompt: prompt, overwrite: overwrite })
+                });
+            } catch (e) { alert('Error: ' + e); return; }
+            startScript('caption');
+        }
+
         async function runPrecache() {
             await savePrecacheSettings();
             startScript('precache');
@@ -1444,6 +1528,7 @@
                 allDatasetImages = data.images || [];
                 document.getElementById('ds-count').innerText = data.image_count;
                 document.getElementById('ds-txt-count').innerText = data.caption_count;
+                updateCaptionButton(data.image_count, data.caption_count);
                 renderDatasetGrid(allDatasetImages);
             } catch (e) {}
         }
@@ -1454,7 +1539,10 @@
             images.forEach(img => {
                 const card = document.createElement('div');
                 card.className = 'ds-card';
-                card.onclick = () => openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '');
+                card.onclick = (ev) => {
+                    if (ev.target.closest('.ds-del')) return;
+                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '');
+                };
                 
                 const hasCaption = img.has_txt && img.caption && img.caption.trim().length > 0;
                 const dotClass = hasCaption ? 'caption-dot dot-green' : 'caption-dot dot-red';
@@ -1463,13 +1551,56 @@
                 card.innerHTML = `
                     <div class="img-wrapper">
                         <img src="/api/dataset-image/${img.file}" alt="${img.file}">
+                        <button type="button" class="ds-del" title="Remove from dataset / Eliminar del dataset">&#128465;</button>
                         <span class="${dotClass}" title="${dotTitle}"></span>
                         <div class="img-filename-tag">${img.file}</div>
                     </div>
                     <div class="caption">${img.caption || '<em>No .txt caption / Sin texto</em>'}</div>
                 `;
+                const delBtn = card.querySelector('.ds-del');
+                if (delBtn) delBtn.onclick = (ev) => { ev.stopPropagation(); deleteDatasetImage(img.file); };
                 grid.appendChild(card);
             });
+        }
+
+        async function deleteDatasetImage(file) {
+            const msg = 'Remove "' + file + '" and its .txt caption from the dataset?\n\n'
+                      + '\u00bfEliminar "' + file + '" y su caption .txt del dataset?\n\n'
+                      + 'The files are deleted from disk. / Los ficheros se borran del disco.';
+            if (!confirm(msg)) return;
+            try {
+                const res = await fetch('/api/delete-dataset-image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file: file })
+                });
+                const data = await res.json();
+                if (data.status !== 'ok') { alert('Error: ' + (data.error || 'unknown')); return; }
+                loadDatasetInfo();
+            } catch (e) { alert('Error: ' + e); }
+        }
+
+        async function deleteProjectData(target) {
+            const texts = {
+                precache: 'This will delete the current pre-cache.\n\nEsto borrar\u00e1 la pre-cach\u00e9 actual.',
+                training: 'This will delete all the current training.\n\nEsto eliminar\u00e1 todo el entrenamiento actual.'
+            };
+            if (!confirm(texts[target] + '\n\nContinue? / \u00bfContinuar?')) return;
+            try {
+                const res = await fetch('/api/delete-project-data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target: target })
+                });
+                const data = await res.json();
+                if (data.status === 'error') { alert('Error: ' + (data.error || 'unknown')); return; }
+                let out = data.removed + ' item(s) deleted / elemento(s) borrado(s)\n' + data.path;
+                if (data.errors && data.errors.length) {
+                    out += '\n\nCould not delete / No se pudo borrar:\n' + data.errors.join('\n');
+                }
+                alert(out);
+                if (target === 'precache') { loadDatasetInfo(); }
+            } catch (e) { alert('Error: ' + e); }
         }
 
         function filterDatasetGrid() {

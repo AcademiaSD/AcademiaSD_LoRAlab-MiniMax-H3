@@ -1,0 +1,4 @@
+{
+  "caption_prompt": "Describe this image for training a text-to-video model. One single paragraph, plain prose, no lists and no preamble. Cover: the subject and what they are doing, hair and clothing, the framing and camera angle, the setting, and the lighting. Do not invent a name and do not mention that this is an image or a photo.",
+  "overwrite": true
+}
