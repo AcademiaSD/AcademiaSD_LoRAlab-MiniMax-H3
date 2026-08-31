@@ -118,7 +118,7 @@ The three VRAM fields are **computed, not fixed**. Pick your card in the dropdow
 
 Typical values with short captions, at the default 576×576 and at 768×768:
 
-| Card | GPU VRAM @576² | @768² | Blocks @576² | Blocks @768² | s/it @576² |
+| Card | GPU VRAM @576² | @768² | Blocks @576² | Blocks @768² | s/it @576²*|
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | 32 GB | 21.22 | 21.22 | 50 of 50 | 50 of 50 | no swap |
 | 24 GB | 21.22 | 21.22 | 50 of 50 | 50 of 50 | no swap |
@@ -127,6 +127,7 @@ Typical values with short captions, at the default 576×576 and at 768×768:
 | 10 GB | 7.89 | 7.23 | 10 of 50 | 8 of 50 | ~7.1 |
 | 8 GB | 5.89 | 5.23 | 4 of 50 | 2 of 50 | ~8.1 |
 
+** Estimated speed for an RTX 5080 with 16GB of VRAM.
 `Swap` stays at **1.34** and `Headroom` at **0.1** for every card.
 
 **What the low end really costs.** Every swapped block costs about **0.18 s/it**, measured. An 8 GB card keeps only 4 of the 50 blocks resident, so a step takes ~8.1 s against ~3.7 s on a 16 GB card: a 600-step run is about **80 minutes** instead of 37. It works, it is just slower — the block swap is what makes it possible at all.
