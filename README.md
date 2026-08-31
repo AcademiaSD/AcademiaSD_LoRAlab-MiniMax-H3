@@ -1,4 +1,4 @@
-# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.98
+# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.1
 
 ![AcademiaSD LoRAlab MiniMax-H3](assets/portada.jpg)
 
