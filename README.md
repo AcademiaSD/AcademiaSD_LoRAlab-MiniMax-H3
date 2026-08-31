@@ -1,9 +1,9 @@
-# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.99
+# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.1
 
 ![AcademiaSD LoRAlab MiniMax-H3](assets/portada.jpg)
 
 <p align="center">
-  <b>Train MiniMax-H3 character & style LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, on 16 GB of VRAM.</b>
+  <b>Train MiniMax-H3 character & style LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, from 6 GB of VRAM.</b>
 </p>
 
 <p align="center">
@@ -20,9 +20,9 @@
 
 **MiniMax-H3** is a 33-Billion parameter Diffusion Transformer that generates video **and audio jointly**, from a single packed sequence. The official checkpoint is **498 GB**; the generic partition alone is **135 GB**. Training a LoRA on it normally means datacenter hardware.
 
-**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **two hours**.
+**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **half an hour** — and on cards down to **6 GB** if you are patient.
 
-> **Verified result:** 8 images at 768×768, 500 steps, LR 2e-4, rank/alpha 16 → excellent likeness, confirmed in ComfyUI video generation. The trainer runs at ~8.4 s/it on an RTX 5080 (16 GB).
+> **Verified result:** 8 images at 768×768, 500 steps, LR 2e-4, rank/alpha 16 → excellent likeness, confirmed in ComfyUI video generation. The trainer runs at ~4.2 s/it on an RTX 5080 (16 GB). At 512×512, 400 steps is enough and takes about 25 minutes.
 
 This trainer is for **image datasets** (characters, faces, styles). It does not train video clips or audio.
 
@@ -34,7 +34,9 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 
 * **4-bit NormalFloat (NF4) quantization**: the 50-block DiT backbone and the Qwen3-VL-32B text encoder are stored as `Linear4bit` NF4 weights. Measured on disk: **135 GB → 39 GB**. Only **86,474,752** parameters are trainable — **0.26 %** of the model's 33,209,467,648.
 * **Precision-critical modules stay in float**: the model declares `proj_in`, `audio_proj_in`, `time_embedder`, `proj_out`, `audio_proj_out` and `rope` as `_keep_in_fp32_modules`. These plus the modulation path (`norm_out`, `context_embedder`, `token_refiner`) are reloaded **without** NF4 from a `precision_critical` section of the quantized repo. Quantization error there breaks the final AdaLN cancellation.
-* **Adjustable block swap**: transformer blocks are parked in system RAM and streamed to VRAM just in time, with a **hard cap** (`set_per_process_memory_fraction`) so the process physically cannot exceed its budget. This is what lets you *simulate* a smaller card and know whether a run would fit on 12 GB before you own one.
+* **Adjustable block swap**: transformer blocks are parked outside VRAM and streamed in just in time, with a **hard cap** (`set_per_process_memory_fraction`) so the process physically cannot exceed its budget. This is what lets you *simulate* a smaller card and know whether a run would fit on 12 GB before you own one.
+
+* **Frozen weights never travel home** (`nf4_cpu_home`): the NF4 weights are read-only, so once a block's CPU-side bytes exist they stay valid forever. The swap uploads them and then simply releases the GPU copy, instead of downloading 0.28 GB back over PCIe every time — which, at ~94 block evictions per step, was **26 GB of pointless PCIe traffic and 94 allocate/free cycles per step**. Removing it **halved the step time on every profile** and cut system RAM from 28.8 GB to 17.1 GB on a 16 GB card. Those CPU-side bytes are the memory-mapped checkpoint itself, so the trainer's hard RAM requirement is **2.2 GB**; the rest is file-backed and the OS can reclaim it.
 * **Zero VRAM spent on encoders**: during training **neither the text encoder nor the VAE are loaded**. Every embedding and latent is computed once, offline, in the pre-cache stage.
 * **fp32 LoRA weights and optimizer state**: deliberately *not* 8-bit. On H3 the per-parameter LoRA gradients are tiny; `AdamW8bit` quantizes `exp_avg_sq` (squared gradients ~1e-6) and destroys exactly the low-magnitude components where facial detail lives. The result is a LoRA that gets pose, hair and framing right and leaves the face soft. fp32 costs ~6 bytes/param and fixes it.
 
@@ -61,6 +63,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 - **🌐 Modern Web GUI** — pre-cache, dataset editing, training, previews, checkpoints and export from a single-page Flask app.
 - **🚀 1-Click launch** — `Run_LoRAlab-MiniMaxH3.bat` starts the server and opens `http://127.0.0.1:5000`.
 - **🎛️ VRAM profiles** — a dropdown with presets for **32, 24, 16, 12, 10 and 8 GB** cards. Every field stays editable by hand; the dropdown switches to *Custom* the moment you type, so it never advertises a preset that does not match your values.
+- **💽 Block swap storage** — parked blocks live in **RAM** (default), on **disk** as a memory-mapped file, or **Auto**, which keeps them in RAM until a system-RAM ceiling you set would be crossed and spills the rest. Disk is not a speed option — it measured the same as RAM — but the memory it uses is evictable, so a machine short on RAM degrades instead of running out. The file is sized to the blocks actually parked and deleted when training ends.
 - **⏱️ Exact-step resume** — stop at any step and continue from it. The checkpoint is written atomically with a strict invariant (weights → optimizer → step file, and the step file only if the first two succeeded), so a kill mid-write can never leave an inconsistent resume point.
 - **🎲 Deterministic across pauses** — the RNG is seeded **per step** with a splitmix64 mix of `(seed, step)`, and the dataset sampler is a shuffled per-epoch permutation derived from the same step index. Step N always sees the same image, sigma and noise whether it came from one continuous run or ten resumes.
 - **🔁 Live settings** — edit preview settings, `save_every`, `lr`, `max_grad_norm` or lower `total_steps` **while training is running**, press *Save JSON*, and the change lands on the next step. Costs one `getmtime` per step.
@@ -92,26 +95,50 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | Requirement | Minimum | Recommended |
 | :--- | :--- | :--- |
 | **OS** | Windows 10/11 | Windows 11 |
-| **GPU** | NVIDIA, **8 GB VRAM** | NVIDIA, **16–24 GB VRAM** |
-| **System RAM** | **32 GB** | **64 GB+** (block swap parks the model in RAM) |
+| **GPU** | NVIDIA, **6 GB VRAM** (at 320²) · **8 GB** for 512² | NVIDIA, **16–24 GB VRAM** |
+| **System RAM** | **16 GB** | **32 GB** |
 | **Disk** | **45 GB** free for the NF4 model | 60 GB+ |
 | **Python** | 3.10+ (inside `venv`) | 3.11 / 3.13 |
 | **CUDA** | 12.1+ | 12.8 / 13.0 |
 
 ### VRAM profiles
 
-| Profile | GPU VRAM | Swap | Headroom | Status |
-| :--- | ---: | ---: | ---: | :--- |
-| 32 GB | 30.0 | 1.35 | 0.1 | Comfortable |
-| 24 GB | 22.0 | 1.35 | 0.1 | Comfortable |
-| **16 GB** | **13.6** | **1.35** | **0.1** | **Verified** |
-| 12 GB | 10.0 | 1.35 | 0.1 | Expected to work |
-| 10 GB | 8.0 | 1.35 | 0.1 | Expected to work |
-| 8 GB | 6.0 | 1.35 | 0.1 | At the measured floor |
+The three VRAM fields are **computed, not fixed**. Pick your card in the dropdown — or **Auto** to detect it — and the trainer sizes them for *your* resolution and *your* caption lengths, because both change how much VRAM a step needs. Picking a size smaller than your card **simulates** it, which is how you find out whether a run would fit on a 12 GB GPU without owning one.
 
-**There are no profiles below 8 GB.** 6 GB and 4 GB were tested and do **not** fit: the measured VRAM floor for a run is **~7.2 GB**. The swap budget has to hold one NF4 block **plus** the full bf16 weight that bitsandbytes materializes for every matmul, on top of the CUDA context and the desktop.
+Typical values at 768×768 with short captions:
 
-Reference timing: **~8.4 s/it** on an RTX 5080 16 GB at 768×768 — about **70 minutes for the default 500 steps**.
+| Card | GPU VRAM @768² | @512² | Blocks @768² | Blocks @512² | s/it @512² |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 32 GB | 21.24 | 21.24 | 50 of 50 | 50 of 50 | no swap |
+| 24 GB | 21.24 | 21.24 | 50 of 50 | 50 of 50 | no swap |
+| **16 GB** | **13.56** | **14.22** | **27 of 50** | **29 of 50** | **~3.8** |
+| 12 GB | 9.22 | 9.89 | 14 of 50 | 16 of 50 | ~5.8 |
+| 10 GB | 6.89 | 7.89 | 7 of 50 | 10 of 50 | ~6.7 |
+| 8 GB | 4.89 | 5.56 | 1 of 50 | 3 of 50 | ~7.6 |
+
+`Swap` stays at **1.34** and `Headroom` at **0.1** for every card.
+
+**What the low end really costs.** Every swapped block costs about **0.15 s/it**, measured. An 8 GB card keeps only 3 of the 50 blocks resident, so a step takes ~7.6 s against ~3.8 s on a 16 GB card: a 400-step run is about **50 minutes** instead of 25. It works, it is just slower — the block swap is what makes it possible at all.
+
+At 512×512 every card gets two to three more resident blocks and a much smaller activation footprint, which is why it is the practical choice below 16 GB.
+
+The sizing model was fitted against measured runs on an RTX 5080 16 GB and reproduces their VRAM peaks to within 0.31 GiB across the whole range, from a 6 GB emulation (predicted 5.88, measured 5.5) up to the point where a run tips into Windows shared memory and the speed collapses — which it also predicts correctly. It always errs on the conservative side, predicting slightly more VRAM than a run actually takes.
+
+**`Swap` must not go below 1.34.** One NF4 block is exactly 333,204,880 bytes and the swap guard requires four times that (1.3328 GB) to cover the block plus the full bf16 weight bitsandbytes materializes for each matmul. Below it the trainer refuses to start, with a message telling you the minimum.
+
+**How low can you go?** There is a floor that no setting removes: **1.92 GB** of always-resident non-block weights plus **~3.49 GB** of CUDA context, cuBLAS workspaces and the swap buffer — **5.41 GB before a single video token**. What is left over decides the resolution:
+
+| Resolution | Peak with 0 resident blocks | Smallest card |
+| :--- | ---: | :--- |
+| 768² | 6.99 | 8 GB |
+| 512² | 6.24 | 8 GB |
+| 448² | 6.10 | 8 GB |
+| 384² | 5.98 | 6 GB, tight |
+| **320²** | **5.5 (measured)** | **6 GB** |
+
+**6 GB works at 320×320**, measured at 5.5 GB peak and ~8.7 s/it with all 50 blocks swapped. It is the true edge of the trainer: every block streams, and a laptop that shares the GPU with its display may not have the headroom. Treat 8 GB as the comfortable minimum and 6 GB as a card that can train, not one that trains well.
+
+Reference timing: **~4.2 s/it** on an RTX 5080 16 GB at 768×768 — about **35 minutes for the default 500 steps**.
 
 ---
 
@@ -214,6 +241,10 @@ Most settings live in the `DEFAULTS` dictionary at the top of each script, docum
 | `optimizer_type` | `adamw` | `adamw8bit` leaves the face soft on H3. |
 | `lr_schedule` | `flat` | A cosine decay spends half the movement budget before the LoRA arrives anywhere. |
 | `caption_dropout` | `0.05` | Forces identity into the weights, not into caption correlation. |
+| `nf4_cpu_home` | `True` | Reuses each block's CPU-side bytes instead of copying them back from the GPU. Halves the step time. Safe because NF4 weights are frozen; set `False` only to rule it out while debugging. |
+| `park_mode` | `auto` | Where parked blocks live: `ram`, `disk`, or `auto` (RAM until `ram_limit_gb` would be crossed). |
+| `ram_limit_gb` | `0` | `auto` only. Ceiling for **total system** RAM, the figure in Task Manager. `0` = no limit. |
+| `park_disk_dir` | `""` | Where the spill file goes. Defaults to the output folder; point it at a drive with room, the file needs up to ~16 GB. |
 | `sigma_shift` | `null` | Logit-normal + resolution shift. Do **not** set 12.0 here. |
 | `timestep_convention` | `one_minus_sigma` | `t = 1 − σ`, unscaled. |
 | `lora_exclude_refiner` | `false` | The token refiner blocks are trained, matching the reference LoRAs. |
@@ -256,7 +287,7 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 * **Image datasets only.** Video clips and audio training are not implemented. The trainer targets characters and styles.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
-* **8 GB is the floor.** The measured minimum for a run is ~7.2 GB of VRAM; 6 GB and 4 GB profiles were tested and removed because they do not fit.
+* **6 GB is the floor, 8 GB is the comfortable one.** A 6 GB card trains at 320×320 (5.5 GB measured peak, all 50 blocks swapped). Below 320² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
 * **Windows-focused.** The launchers are `.bat` files; the Python should run elsewhere but is untested.
 
 ---
