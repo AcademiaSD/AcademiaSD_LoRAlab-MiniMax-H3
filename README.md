@@ -75,7 +75,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 - **⏱️ Exact-step resume** — stop at any step and continue from it. The checkpoint is written atomically with a strict invariant (weights → optimizer → step file, and the step file only if the first two succeeded), so a kill mid-write can never leave an inconsistent resume point.
 - **🎲 Deterministic across pauses** — the RNG is seeded **per step** with a splitmix64 mix of `(seed, step)`, and the dataset sampler is a shuffled per-epoch permutation derived from the same step index. Step N always sees the same image, sigma and noise whether it came from one continuous run or ten resumes.
 - **🔁 Live settings** — edit preview settings, `save_every`, `lr`, `max_grad_norm` or lower `total_steps` **while training is running**, press *Save JSON*, and the change lands on the next step. Costs one `getmtime` per step.
-- **📈 Total training time** — reported bilingually at the end (`2 Hours 26 Minutes / 2 Horas 26 Minutos`), accumulated across resumes.
+- **📈 Total training time** — reported bilingually at the end (e.g. `2 Hours 26 Minutes / 2 Horas 26 Minutos`), accumulated across resumes.
 - **📝 Full run log on disk** — everything the console shows is mirrored to `<output_dir>/train_log.txt`, flushed on every write, so a crash or a closed browser tab never loses the history.
 
 ### Previews
