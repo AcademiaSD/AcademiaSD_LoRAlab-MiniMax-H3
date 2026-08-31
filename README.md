@@ -1,4 +1,4 @@
-# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.98
+# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.1
 
 ![AcademiaSD LoRAlab MiniMax-H3](assets/portada.jpg)
 
@@ -16,13 +16,21 @@
 
 ---
 
+<p align="center">
+  <img src="assets/interface.jpg" alt="AcademiaSD LoRAlab MiniMax-H3 interface" width="100%">
+</p>
+
+---
+
 ## 🎯 What this is
 
 **MiniMax-H3** is a 33-Billion parameter Diffusion Transformer that generates video **and audio jointly**, from a single packed sequence. The official checkpoint is **498 GB**; the generic partition alone is **135 GB**. Training a LoRA on it normally means datacenter hardware.
 
-**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **half an hour** — and down to **8 GB** if you are patient.
+**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **40 minutes** — and down to **8 GB** if you are patient.
 
-> **Verified result:** 8 images at **512×512**, **600 steps**, LR 2e-4, **rank/alpha 8** → excellent likeness, confirmed in ComfyUI video generation. These are the shipped defaults. Rank 8 came out *better* than rank 16, not merely cheaper, and 448×448 works just as well if you want it faster. On an RTX 5080 (16 GB) that is about **~3.8 s/it**, roughly **38 minutes**.
+> **Verified result:** 8 images at **576×576**, **600 steps**, LR 2e-4, **rank/alpha 16** → excellent likeness *and* full prompt obedience, confirmed in ComfyUI video generation and tested alongside several Turbo LoRAs. These are the shipped defaults. On an RTX 5080 (16 GB) that is about **~3.7 s/it**, roughly **37 minutes**.
+
+> **Why rank 16 and not rank 8.** Rank 8 produces an equally good likeness for less VRAM, which makes it look like the better deal — but it is not. With only 8 directions per matrix the adapter runs out of room for the identity and starts occupying directions the base model was using for composition. The symptom is subtle and easy to misread: the face is perfect, and the model stops obeying the prompt. Ask for a beach and you get a bedroom. Rank 16 has room for the identity without evicting anything, so likeness and prompt adherence improve together.
 
 This trainer is for **image datasets** (characters, faces, styles). It does not train video clips or audio.
 
@@ -98,8 +106,8 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | Requirement | Minimum | Recommended |
 | :--- | :--- | :--- |
 | **OS** | Windows 10/11 | Windows 11 |
-| **GPU** | NVIDIA, **8 GB VRAM** (6 GB is theoretically possible, see below) | NVIDIA, **16–24 GB VRAM** |
-| **System RAM** | **32 GB** (less is possible with disk swap, see below) | **32 GB** |
+| **GPU** | NVIDIA, **8 GB VRAM** | NVIDIA, **16–24 GB VRAM** |
+| **System RAM** | **16 GB** with disk swap (see below) | **32 GB** |
 | **Disk** | **45 GB** for the NF4 model, **+8 GB** if you use auto-captioning | 60 GB+ |
 | **Python** | 3.10+ (inside `venv`) | 3.11 / 3.13 |
 | **CUDA** | 12.1+ | 12.8 / 13.0 |
@@ -108,24 +116,24 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 
 The three VRAM fields are **computed, not fixed**. Pick your card in the dropdown — or **Auto** to detect it — and the trainer sizes them for *your* resolution and *your* caption lengths, because both change how much VRAM a step needs. Picking a size smaller than your card **simulates** it, which is how you find out whether a run would fit on a 12 GB GPU without owning one.
 
-Typical values at 768×768 with short captions:
+Typical values with short captions, at the default 576×576 and at 768×768:
 
-| Card | GPU VRAM @768² | @512² | Blocks @768² | Blocks @512² | s/it @512² |
+| Card | GPU VRAM @576² | @768² | Blocks @576² | Blocks @768² | s/it @576² |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| 32 GB | 21.24 | 21.24 | 50 of 50 | 50 of 50 | no swap |
-| 24 GB | 21.24 | 21.24 | 50 of 50 | 50 of 50 | no swap |
-| **16 GB** | **13.56** | **14.22** | **27 of 50** | **29 of 50** | **~3.8** |
-| 12 GB | 9.22 | 9.89 | 14 of 50 | 16 of 50 | ~5.8 |
-| 10 GB | 6.89 | 7.89 | 7 of 50 | 10 of 50 | ~6.7 |
-| 8 GB | 4.89 | 5.56 | 1 of 50 | 3 of 50 | ~7.6 |
+| 32 GB | 21.22 | 21.22 | 50 of 50 | 50 of 50 | no swap |
+| 24 GB | 21.22 | 21.22 | 50 of 50 | 50 of 50 | no swap |
+| **16 GB** | **14.22** | **13.89** | **29 of 50** | **28 of 50** | **~3.7** |
+| 12 GB | 10.22 | 9.56 | 17 of 50 | 15 of 50 | ~5.8 |
+| 10 GB | 7.89 | 7.23 | 10 of 50 | 8 of 50 | ~7.1 |
+| 8 GB | 5.89 | 5.23 | 4 of 50 | 2 of 50 | ~8.1 |
 
 `Swap` stays at **1.34** and `Headroom` at **0.1** for every card.
 
-**What the low end really costs.** Every swapped block costs about **0.15 s/it**, measured. An 8 GB card keeps only 3 of the 50 blocks resident, so a step takes ~7.6 s against ~3.8 s on a 16 GB card: a 400-step run is about **50 minutes** instead of 25. It works, it is just slower — the block swap is what makes it possible at all.
+**What the low end really costs.** Every swapped block costs about **0.18 s/it**, measured. An 8 GB card keeps only 4 of the 50 blocks resident, so a step takes ~8.1 s against ~3.7 s on a 16 GB card: a 600-step run is about **80 minutes** instead of 37. It works, it is just slower — the block swap is what makes it possible at all.
 
-At 512×512 every card gets two to three more resident blocks and a much smaller activation footprint, which is why it is the practical choice below 16 GB.
+Dropping to 512×512 or 448×448 gives every card two to four more resident blocks and a smaller activation footprint, which is why they are worth trying below 16 GB.
 
-The sizing model was fitted against measured runs on an RTX 5080 16 GB and reproduces their VRAM peaks to within 0.31 GiB across the whole range, from a 6 GB emulation (predicted 5.88, measured 5.5) up to the point where a run tips into Windows shared memory and the speed collapses — which it also predicts correctly. It always errs on the conservative side, predicting slightly more VRAM than a run actually takes.
+The sizing model was fitted against measured runs on an RTX 5080 16 GB and reproduces their VRAM peaks to within 0.31 GiB across the whole range, up to the point where a run tips into Windows shared memory and the speed collapses — which it also predicts correctly. It always errs on the conservative side, predicting slightly more VRAM than a run actually takes.
 
 **`Swap` must not go below 1.34.** One NF4 block is exactly 333,204,880 bytes and the swap guard requires four times that (1.3328 GB) to cover the block plus the full bf16 weight bitsandbytes materializes for each matmul. Below it the trainer refuses to start, with a message telling you the minimum.
 
@@ -133,26 +141,24 @@ The sizing model was fitted against measured runs on an RTX 5080 16 GB and repro
 
 | Resolution | Peak with 0 resident blocks | Smallest card |
 | :--- | ---: | :--- |
-| 768² | 6.99 | 8 GB |
-| 512² | 6.24 | 8 GB |
-| 448² | 6.10 | 8 GB |
-| 384² | 5.98 | 6 GB* |
-| **320²** | **5.5 (emulated)** | **6 GB*** |
+| 768² | 6.79 | 8 GB |
+| **576²** (default) | **6.20** | **8 GB** |
+| 512² | 6.04 | 8 GB |
+| 448² | 5.90 | 8 GB |
 
-\* Emulated, never run on a real 6 GB card — see the note below.
-
-> **6 GB: theoretically possible, not tested on real hardware.**
-> A 6 GB card was *emulated* on a 16 GB one by capping the budget at 4.56 (zero resident blocks), and the run held at **5.5 GB peak and ~8.7 s/it** at 320×320. That says the arithmetic works, not that the card does: an emulation does not reproduce a real 6 GB card's driver behaviour, and a laptop that shares the GPU with its display has less headroom than the raw figure suggests. If you own one, we would like to hear how it goes.
-
-**8 GB is the tested minimum.** Below 512² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
+**8 GB is the minimum.** Even at 448×448, stripping every block out of VRAM still leaves 5.90 GB that has to be resident, so a 6 GB card has nowhere to put the desktop. It was reached once, in emulation, at 320×320 — a resolution too small to produce a LoRA worth using. Treat 448×448 as the bottom of the useful range and 8 GB as the card that runs it. 4 GB does not fit at any resolution.
 
 ### System RAM
 
 The blocks that do not fit in VRAM are parked in system RAM, so the RAM the trainer needs moves **opposite** to your VRAM: the smaller the card, the more blocks are parked and the more RAM they take. Measured on a 16 GB card at 512²: **17.1 GB of total system RAM**, of which only **2.2 GB is memory the process exclusively owns** — the rest is the memory-mapped checkpoint, which the OS can reclaim under pressure.
 
-**Normal use stays under 32 GB**, low-VRAM profiles included. If your machine has less, set **Block Swap Storage** to `Disk` in the Dataset panel: the parked blocks move to a memory-mapped file instead of RAM. It is not faster — it measured the same — but that memory becomes evictable, so a machine short on RAM degrades instead of running out. It needs up to 16 GB of free disk, sized to the blocks actually parked and deleted when training ends. `Auto` does the same thing only when a RAM ceiling you set would be crossed.
+**Normal use stays under 32 GB**, low-VRAM profiles included, and 32 GB is the comfortable recommendation.
 
-Reference timing: **~3.8 s/it** on an RTX 5080 16 GB at the default 512×512 — about **38 minutes for the default 600 steps**. At 768×768 it is ~4.2 s/it.
+**16 GB may well be enough** — set **Block Swap Storage** to `Disk` and the parked blocks move to a memory-mapped file instead of RAM. Since only 2.2 GB is memory the process truly owns, what is left is evictable and the OS reclaims it under pressure: the machine slows down instead of running out. This has not been tested on a real 16 GB machine, only reasoned from the measurements above, so treat it as likely rather than promised. Disk mode is not faster — it measured the same as RAM — it simply moves the pressure somewhere the OS can manage. It needs up to 16 GB of free disk, sized to the blocks actually parked and deleted when training ends.
+
+`Auto` does the same thing but only when a RAM ceiling you set would be crossed.
+
+Reference timing: **~3.7 s/it** on an RTX 5080 16 GB at the default 576×576 — about **37 minutes for the default 600 steps**.
 
 ---
 
@@ -211,7 +217,7 @@ The prompt is editable next to the button, so you can ask for a different style 
 
 1. Enter a **Project Name** and a **Trigger Word**.
 2. Pick the dataset folder with **Browse / Explorar**.
-3. Set **Resolution** (512×512 recommended) and **Multiple** (32).
+3. Set **Resolution** (576×576 recommended) and **Multiple** (32).
 4. Click **Start Pre-Cache**.
 
 This loads the Qwen3-VL-32B text encoder once, writes the layer-50 embeddings and VAE latents to disk, and releases everything. It also runs self-tests (RoPE liveness, prompt discrimination, latent statistics) and writes a full `_diagnostics.json`.
@@ -226,11 +232,11 @@ Recommended starting point, the configuration that produced the verified result:
 | :--- | :--- |
 | Total Steps | 600 |
 | Learning Rate | 2e-4 |
-| LoRA Rank / Alpha | 8 / 8 |
+| LoRA Rank / Alpha | 16 / 16 |
 | Batch Size | 1 |
 | Grad Accum | 1 |
 | Save Every | 100 |
-| Resolution | 512×512 |
+| Resolution | 576×576 |
 | Max Seq Len | 100 |
 | Dataset | 8–20 images |
 
@@ -321,8 +327,9 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 * **Image datasets only.** Video clips and audio training are not implemented. The trainer targets characters and styles.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
-* **8 GB is the tested floor. 6 GB is theory.** A 6 GB card was only ever *emulated* on a 16 GB one (5.5 GB peak at 320×320, all 50 blocks swapped). The arithmetic says it fits; nobody has run it on real 6 GB silicon. Below 320² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
-* **Windows-focused.** The launchers are `.bat` files; the Python should run elsewhere but is untested.
+* **8 GB is the floor.** Even at 448×448, the smallest resolution worth training at, 5.90 GB has to stay resident no matter how many blocks you swap out. A 6 GB card has nowhere left for the desktop. 4 GB does not fit at any resolution.
+* **Tested with Turbo LoRAs.** The exported LoRAs load and behave correctly in ComfyUI alongside several Turbo LoRAs, with no key clashes or strength interference.
+* **Windows-focused.** The launchers are `.bat` files. The three Python scripts carry no platform-specific code and `server.py` already has POSIX branches, so a Linux port is mostly writing `.sh` files — but note that Linux has **no VRAM-to-RAM overflow**: a budget that merely runs slow on Windows will hard-OOM there, so the profiles would need revalidating.
 
 ---
 
