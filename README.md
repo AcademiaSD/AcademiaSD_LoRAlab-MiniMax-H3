@@ -1,9 +1,9 @@
-# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.99
+# AcademiaSD LoRAlab-MiniMax-H3 Beta v0.1
 
 ![AcademiaSD LoRAlab MiniMax-H3](assets/portada.jpg)
 
 <p align="center">
-  <b>Train MiniMax-H3 character & style LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, from 6 GB of VRAM.</b>
+  <b>Train MiniMax-H3 character & style LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, from 8 GB of VRAM.</b>
 </p>
 
 <p align="center">
@@ -20,9 +20,9 @@
 
 **MiniMax-H3** is a 33-Billion parameter Diffusion Transformer that generates video **and audio jointly**, from a single packed sequence. The official checkpoint is **498 GB**; the generic partition alone is **135 GB**. Training a LoRA on it normally means datacenter hardware.
 
-**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **half an hour** — and on cards down to **6 GB** if you are patient.
+**AcademiaSD LoRAlab MiniMax-H3** trains character and style LoRAs from a folder of **images and captions**, on a **16 GB consumer GPU**, in about **half an hour** — and down to **8 GB** if you are patient.
 
-> **Verified result:** 8 images at 768×768, 500 steps, LR 2e-4, rank/alpha 16 → excellent likeness, confirmed in ComfyUI video generation. The trainer runs at ~4.2 s/it on an RTX 5080 (16 GB). At 512×512, 400 steps is enough and takes about 25 minutes.
+> **Verified result:** 8 images at **512×512**, **600 steps**, LR 2e-4, **rank/alpha 8** → excellent likeness, confirmed in ComfyUI video generation. These are the shipped defaults. Rank 8 came out *better* than rank 16, not merely cheaper, and 448×448 works just as well if you want it faster. On an RTX 5080 (16 GB) that is about **~3.8 s/it**, roughly **38 minutes**.
 
 This trainer is for **image datasets** (characters, faces, styles). It does not train video clips or audio.
 
@@ -77,8 +77,11 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 - **🎚️ Sampler control** — MiniMax-H3 ships exactly one sampler (rectified-flow Euler, `eta = 0`); its sigma shift is the only real knob and is exposed with sensible presets.
 - **💾 VAE on CPU or CUDA** — the VAE decoder is ~2.4 G parameters (4.8 GB in bf16). On CPU it costs ~90 s and touches no VRAM; on a 24 GB+ card, CUDA takes seconds.
 
-### Dataset
-- **🖼️ Dataset Inspector & caption editor** — visual grid with caption status badges (🟢 present / 🔴 missing), filename overlays, a lightbox to edit `.txt` captions directly on disk, and a batch tool to inject trigger words.
+### Dataset Manager
+- **🖼️ Visual grid & caption editor** — caption status badges (🟢 present / 🔴 missing), filename overlays, a lightbox to edit `.txt` captions directly on disk, and a batch tool to inject trigger words.
+- **🤖 Auto-captioning** — one button writes a caption for every image with **Qwen3-VL-4B-Instruct**, trigger word first. The button reads *Create Captions* or *Redo Captions* depending on what already exists, and asks before overwriting. The prompt is editable, so you can steer the style without touching code.
+- **🗑️ Per-image delete** — a trash icon on each thumbnail removes the image **and its `.txt`** from disk, with a confirmation naming the file.
+- **🧹 Delete project data** — two buttons wipe the current project's **pre-cache** or **training output**, each behind its own confirmation. They refuse to run while a process is active, since deleting underneath a running trainer leaves it writing into a checkpoint that no longer exists.
 - **📊 Dataset summary** — image count, epochs, and the video-token grid, reported before training starts so you can plan the next experiment.
 
 ### System
@@ -95,9 +98,9 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 | Requirement | Minimum | Recommended |
 | :--- | :--- | :--- |
 | **OS** | Windows 10/11 | Windows 11 |
-| **GPU** | NVIDIA, **6 GB VRAM** (at 320²) · **8 GB** for 512² | NVIDIA, **16–24 GB VRAM** |
-| **System RAM** | **16 GB** | **32 GB** |
-| **Disk** | **45 GB** free for the NF4 model | 60 GB+ |
+| **GPU** | NVIDIA, **8 GB VRAM** (6 GB is theoretically possible, see below) | NVIDIA, **16–24 GB VRAM** |
+| **System RAM** | **32 GB** (less is possible with disk swap, see below) | **32 GB** |
+| **Disk** | **45 GB** for the NF4 model, **+8 GB** if you use auto-captioning | 60 GB+ |
 | **Python** | 3.10+ (inside `venv`) | 3.11 / 3.13 |
 | **CUDA** | 12.1+ | 12.8 / 13.0 |
 
@@ -133,12 +136,23 @@ The sizing model was fitted against measured runs on an RTX 5080 16 GB and repro
 | 768² | 6.99 | 8 GB |
 | 512² | 6.24 | 8 GB |
 | 448² | 6.10 | 8 GB |
-| 384² | 5.98 | 6 GB, tight |
-| **320²** | **5.5 (measured)** | **6 GB** |
+| 384² | 5.98 | 6 GB* |
+| **320²** | **5.5 (emulated)** | **6 GB*** |
 
-**6 GB works at 320×320**, measured at 5.5 GB peak and ~8.7 s/it with all 50 blocks swapped. It is the true edge of the trainer: every block streams, and a laptop that shares the GPU with its display may not have the headroom. Treat 8 GB as the comfortable minimum and 6 GB as a card that can train, not one that trains well.
+\* Emulated, never run on a real 6 GB card — see the note below.
 
-Reference timing: **~4.2 s/it** on an RTX 5080 16 GB at 768×768 — about **35 minutes for the default 500 steps**.
+> **6 GB: theoretically possible, not tested on real hardware.**
+> A 6 GB card was *emulated* on a 16 GB one by capping the budget at 4.56 (zero resident blocks), and the run held at **5.5 GB peak and ~8.7 s/it** at 320×320. That says the arithmetic works, not that the card does: an emulation does not reproduce a real 6 GB card's driver behaviour, and a laptop that shares the GPU with its display has less headroom than the raw figure suggests. If you own one, we would like to hear how it goes.
+
+**8 GB is the tested minimum.** Below 512² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
+
+### System RAM
+
+The blocks that do not fit in VRAM are parked in system RAM, so the RAM the trainer needs moves **opposite** to your VRAM: the smaller the card, the more blocks are parked and the more RAM they take. Measured on a 16 GB card at 512²: **17.1 GB of total system RAM**, of which only **2.2 GB is memory the process exclusively owns** — the rest is the memory-mapped checkpoint, which the OS can reclaim under pressure.
+
+**Normal use stays under 32 GB**, low-VRAM profiles included. If your machine has less, set **Block Swap Storage** to `Disk` in the Dataset panel: the parked blocks move to a memory-mapped file instead of RAM. It is not faster — it measured the same — but that memory becomes evictable, so a machine short on RAM degrades instead of running out. It needs up to 16 GB of free disk, sized to the blocks actually parked and deleted when training ends. `Auto` does the same thing only when a RAM ceiling you set would be crossed.
+
+Reference timing: **~3.8 s/it** on an RTX 5080 16 GB at the default 512×512 — about **38 minutes for the default 600 steps**. At 768×768 it is ~4.2 s/it.
 
 ---
 
@@ -180,13 +194,24 @@ L:\MyDataset\
 └── subject02.txt
 ```
 
-Use the **Dataset Inspector** to check captions, and **+ Trigger All** to inject your trigger word everywhere at once.
+Use the **Dataset Manager** to review everything: caption badges, a lightbox to edit any `.txt`, a trash icon per image, and **+ Trigger All** to inject your trigger word everywhere at once.
+
+**No captions yet?** Press **Create Captions**. It writes one `.txt` per image with the trigger word first, and turns into **Redo Captions** once they exist (asking before it overwrites anything).
+
+The first run downloads **Qwen3-VL-4B-Instruct** (~8 GB) into `./Qwen3-VL-4B-Instruct`; later runs reuse it. It loads in 4-bit — **4.2 GB of VRAM measured** — and takes about **6 seconds per image** on an RTX 5080. It fits on any card from 6 GB up.
+
+Two details worth knowing:
+
+* Images are **shrunk to 512 px in memory only** before the model sees them. Qwen3-VL uses dynamic resolution, so a large image costs many vision tokens for detail a caption does not need. **Your dataset files are never modified** — the script only ever opens `.txt` files for writing.
+* Captions are capped at **80 tokens** (~60 words) because the pre-cache truncates anything past `max_seq_len`, which now defaults to **100**. Generating longer is wasted GPU time.
+
+The prompt is editable next to the button, so you can ask for a different style — more about clothing, less about the background — without touching code.
 
 ### 3. Pre-Cache
 
 1. Enter a **Project Name** and a **Trigger Word**.
 2. Pick the dataset folder with **Browse / Explorar**.
-3. Set **Resolution** (768×768 recommended) and **Multiple** (32).
+3. Set **Resolution** (512×512 recommended) and **Multiple** (32).
 4. Click **Start Pre-Cache**.
 
 This loads the Qwen3-VL-32B text encoder once, writes the layer-50 embeddings and VAE latents to disk, and releases everything. It also runs self-tests (RoPE liveness, prompt discrimination, latent statistics) and writes a full `_diagnostics.json`.
@@ -199,13 +224,14 @@ Recommended starting point, the configuration that produced the verified result:
 
 | Setting | Value |
 | :--- | :--- |
-| Total Steps | 500 |
+| Total Steps | 600 |
 | Learning Rate | 2e-4 |
-| LoRA Rank / Alpha | 16 / 16 |
+| LoRA Rank / Alpha | 8 / 8 |
 | Batch Size | 1 |
 | Grad Accum | 1 |
 | Save Every | 100 |
-| Resolution | 768×768 |
+| Resolution | 512×512 |
+| Max Seq Len | 100 |
 | Dataset | 8–20 images |
 
 Click **Start / Resume**. Stop at any time with **Stop Training** — the exact step is saved and resuming continues from it.
@@ -245,6 +271,11 @@ Most settings live in the `DEFAULTS` dictionary at the top of each script, docum
 | `park_mode` | `auto` | Where parked blocks live: `ram`, `disk`, or `auto` (RAM until `ram_limit_gb` would be crossed). |
 | `ram_limit_gb` | `0` | `auto` only. Ceiling for **total system** RAM, the figure in Task Manager. `0` = no limit. |
 | `park_disk_dir` | `""` | Where the spill file goes. Defaults to the output folder; point it at a drive with room, the file needs up to ~16 GB. |
+| `max_seq_len` | `100` | Text tokens kept per caption (~75 words). Every token rides in the packed sequence and costs VRAM on **every** step. Anything longer is truncated here. |
+| `captioner_repo` | `Qwen/Qwen3-VL-4B-Instruct` | Auto-captioning model, downloaded on first use into `captioner_dir`. |
+| `captioner_4bit` | `True` | 4-bit keeps it at ~3 GB. `False` loads bf16 (~8 GB) for slightly richer descriptions. |
+| `max_new_tokens` | `80` | Caption length cap (~60 words). Leaves room under `max_seq_len` for the trigger word. |
+| `max_image_side` | `512` | Images are shrunk to this **in memory only** before captioning. `0` disables it. Dataset files are never modified. |
 | `sigma_shift` | `null` | Logit-normal + resolution shift. Do **not** set 12.0 here. |
 | `timestep_convention` | `one_minus_sigma` | `t = 1 − σ`, unscaled. |
 | `lora_exclude_refiner` | `false` | The token refiner blocks are trained, matching the reference LoRAs. |
@@ -260,6 +291,7 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 ├── assets/
 │   ├── portada.jpg                 # Web GUI header banner
 │   └── logo_128.png                # Browser favicon
+├── 0_caption_MiniMaxH3.py          # Auto-captioning with Qwen3-VL-4B (optional)
 ├── 1_pre_cache_MiniMaxH3.py        # Text encoder (layer 50) + VAE latent pre-caching
 ├── 2_train_lora_MiniMaxH3.py       # 33B NF4 LoRA trainer, block swap, previews, export
 ├── server.py                       # Flask backend
@@ -267,10 +299,12 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 ├── Run_LoRAlab-MiniMaxH3.bat       # 1-click launcher
 ├── Install_LoRAlab-venv-Minimax.bat
 ├── Install_Triton&SageAtten220.bat
+├── caption_settings.json           # Auto-captioning configuration
 ├── pre_cache_settings.json         # Active pre-cache configuration
 ├── train_settings.json             # Active training configuration
 ├── HF_token.json                   # Optional Hugging Face token
 ├── MiniMax-H3-NF4/                 # Quantized model (auto-downloaded, ~39 GB)
+├── Qwen3-VL-4B-Instruct/           # Captioning model (auto-downloaded, ~8 GB)
 ├── cached_data_minimaxh3_<project>/
 └── minimaxh3_lora_output_<project>/
     ├── MiniMaxH3_LoRA_step_<N>.safetensors
@@ -287,7 +321,7 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 * **Image datasets only.** Video clips and audio training are not implemented. The trainer targets characters and styles.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
-* **6 GB is the floor, 8 GB is the comfortable one.** A 6 GB card trains at 320×320 (5.5 GB measured peak, all 50 blocks swapped). Below 320² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
+* **8 GB is the tested floor. 6 GB is theory.** A 6 GB card was only ever *emulated* on a 16 GB one (5.5 GB peak at 320×320, all 50 blocks swapped). The arithmetic says it fits; nobody has run it on real 6 GB silicon. Below 320² the resolution stops being useful before the VRAM stops fitting, and 4 GB does not fit at any resolution.
 * **Windows-focused.** The launchers are `.bat` files; the Python should run elsewhere but is untested.
 
 ---
