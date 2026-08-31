@@ -36,7 +36,7 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 
 ---
 
-## 🔬 Technical Deep-Dive: how a 33B model fits in 16 GB
+## 🔬 Technical Deep-Dive: how a 33B model fits in 16 GB or less.
 
 ### 1. 📉 The model is compressed 135 GB → 39 GB
 
