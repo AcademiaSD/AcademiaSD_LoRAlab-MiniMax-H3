@@ -149,8 +149,8 @@ DEFAULTS = {
     # rank 8 es poco para clavar una identidad en un DiT de 33B: el detalle facial
     # necesita subespacio. 16 es el punto dulce; 32 si sobra VRAM.
     # rank 8 is thin for identity in a 33B DiT; 16 is the sweet spot, 32 if VRAM allows.
-    "lora_rank": 8,
-    "lora_alpha": 8,
+    "lora_rank": 16,
+    "lora_alpha": 16,
     "weight_decay": 0.0,
 
     # --- Optimizador --------------------------------------------------------
@@ -3076,6 +3076,11 @@ def get_prompt_pair(result):
     )
 
 
+# Ultimo cache_info.json leido. Lo rellena verify_cache_compatibility().
+# Last cache_info.json read, filled in by verify_cache_compatibility().
+_CACHE_INFO = {}
+
+
 def verify_cache_compatibility(cache_dir):
     """Rechaza cachés generadas por un pre-cache roto / Reject caches from a broken pre-cache.
 
@@ -3090,6 +3095,15 @@ def verify_cache_compatibility(cache_dir):
 
     with open(info_path, "r", encoding="utf-8") as f:
         info = json.load(f) or {}
+
+    # Se memoriza para la cabecera del LoRA: la resolucion y el numero de frames
+    # los decidio el pre-cache, el entrenador no los conoce de ninguna otra forma
+    # y son justo lo que hace falta para reproducir un entrenamiento.
+    # Memorised for the LoRA header: the resolution and frame count were decided
+    # by the pre-cache, the trainer has no other way of knowing them, and they are
+    # exactly what is needed to reproduce a run.
+    _CACHE_INFO.clear()
+    _CACHE_INFO.update(info)
 
     version = int(info.get("version", 0) or 0)
     log_print("[CACHE] formato={} version={} | encoding='{}'".format(
@@ -5494,6 +5508,88 @@ def _fuse_qkv_lora(q_A, q_B, k_A, k_B, v_A, v_B, target_rank):
     return qkv_lora_A, qkv_lora_B
 
 
+def build_lora_metadata(prefix, scaling, extra=None):
+    """Cabecera de metadatos del .safetensors.
+
+    Va en el header del fichero, no en los tensores: no pesa nada, no cambia un
+    solo bit de los pesos y cualquier lector puede ignorarla sin romperse.
+
+    Se escriben DOS familias de claves:
+
+      - Legibles (`trigger_word`, `trained_with`, ...) para quien abra el fichero
+        con safetensors y quiera enterarse de algo.
+      - `ss_*`, la convencion de kohya-ss. No es un capricho: es lo que leen
+        CivitAI y los gestores de LoRAs para rellenar solos las palabras clave y
+        los parametros. Sin ellas el LoRA llega sin ficha.
+
+    CivitAI saca las palabras de activacion de `ss_tag_frequency`, que espera un
+    JSON {carpeta: {tag: veces}}. Por eso el trigger va ahi ademas de en su
+    propia clave.
+
+    Metadata header for the .safetensors. It lives in the file header, not in the
+    tensors: it costs nothing, changes no weight, and any reader can ignore it.
+    Two families are written: readable keys, and the kohya-ss `ss_*` convention,
+    which is what CivitAI and LoRA managers actually parse to fill in trigger
+    words and training parameters. CivitAI reads the activation words from
+    `ss_tag_frequency`, a JSON of {folder: {tag: count}}, so the trigger goes
+    there as well as in its own key.
+    """
+    meta = {
+        "format": "minimaxh3_lora",
+        "lora_key_prefix": prefix,
+        "baked_scaling": "{:.6f}".format(scaling),
+        "qkv_fused": "true",
+        "swiglu_fc1_halves_swapped": "true",
+
+        # --- procedencia / provenance ---
+        "trained_with": "AcademiaSD LoRAlab MiniMax-H3",
+        "ss_sd_model_name": "MiniMax-H3",
+        "ss_base_model_version": "MiniMax-H3",
+
+        # --- receta / recipe ---
+        "ss_network_module": "peft.LoraModel",
+        "ss_network_dim": str(LORA_RANK),
+        "ss_network_alpha": str(LORA_ALPHA),
+        "ss_learning_rate": str(LR),
+        "ss_lr_scheduler": str(LR_SCHEDULE),
+        "ss_max_train_steps": str(TOTAL_STEPS),
+        "ss_gradient_accumulation_steps": str(GRAD_ACCUM_STEPS),
+        "ss_seed": str(SEED),
+        "ss_mixed_precision": str(LORA_DTYPE_STR),
+    }
+
+    trigger = (TRIGGER_WORD or "").strip()
+    if trigger:
+        meta["trigger_word"] = trigger
+        meta["ss_output_name"] = PROJECT_NAME or trigger
+        # CivitAI lee de aqui las palabras de activacion.
+        # CivitAI reads the activation words from here.
+        meta["ss_tag_frequency"] = json.dumps({"dataset": {trigger: 1}})
+
+    if PROJECT_NAME:
+        meta["project_name"] = PROJECT_NAME
+        meta.setdefault("ss_output_name", PROJECT_NAME)
+
+    # Resolucion y frames: los fijo el pre-cache, no el entrenador.
+    # Resolution and frames come from the pre-cache, not from the trainer.
+    area = _CACHE_INFO.get("target_area")
+    if area:
+        side = int(round(float(area) ** 0.5))
+        meta["ss_resolution"] = "({},{})".format(side, side)
+    frames = _CACHE_INFO.get("num_frames")
+    if frames:
+        meta["ss_num_frames"] = str(frames)
+
+    if extra:
+        meta.update(extra)
+
+    # safetensors exige que TODO sea str: un int cuelga el guardado con un error
+    # que no dice cual de las claves lo provoco.
+    # safetensors requires every value to be a str: an int fails the save with an
+    # error that does not say which key caused it.
+    return {str(k): str(v) for k, v in meta.items() if v is not None}
+
+
 def save_lora(model, path, prefix=None):
     if prefix is None:
         prefix = LORA_KEY_PREFIX
@@ -5662,17 +5758,7 @@ def save_lora(model, path, prefix=None):
                   "/ NO mlp.fc1 exported; check LoRA target discovery.",
                   flush=True)
 
-    save_file(
-        state,
-        path,
-        metadata={
-            "format": "minimaxh3_lora",
-            "lora_key_prefix": prefix,
-            "baked_scaling": "{:.6f}".format(scaling),
-            "qkv_fused": "true",
-            "swiglu_fc1_halves_swapped": "true",
-        },
-    )
+    save_file(state, path, metadata=build_lora_metadata(prefix, scaling))
 
     # ------------------------------------------------------------------
     # SEGUNDO ARCHIVO CON LAS KEYS EN CRUDO (nombres diffusers, sin fusion QKV).
@@ -5696,12 +5782,11 @@ def save_lora(model, path, prefix=None):
             save_file(
                 raw_state,
                 raw_path,
-                metadata={
+                metadata=build_lora_metadata(prefix, scaling, extra={
                     "format": "minimaxh3_lora_rawkeys",
-                    "lora_key_prefix": prefix,
-                    "baked_scaling": "{:.6f}".format(scaling),
                     "qkv_fused": "false",
-                },
+                    "swiglu_fc1_halves_swapped": "false",
+                }),
             )
             _rs = sorted(raw_state.keys())[:2]
             log_print("[SAVE] Copia con keys en CRUDO -> {} ({} keys). Ejemplos: {}"
