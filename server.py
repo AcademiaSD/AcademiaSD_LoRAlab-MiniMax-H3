@@ -143,12 +143,17 @@ def get_train_output_dir():
 # so adding a format in one place made the others reject it silently.
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
-DATASET_EXTS = IMAGE_EXTS + VIDEO_EXTS
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a")
+DATASET_EXTS = IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS
 
 
 def kind_of(path):
-    """'video' o 'image' segun la extension. / 'video' or 'image' by extension."""
-    return "video" if path.suffix.lower() in VIDEO_EXTS else "image"
+    """'audio', 'video' o 'image' segun la extension.
+    'audio', 'video' or 'image' by extension."""
+    ext = path.suffix.lower()
+    if ext in AUDIO_EXTS:
+        return "audio"
+    return "video" if ext in VIDEO_EXTS else "image"
 
 
 def get_dataset_dir():
@@ -832,8 +837,22 @@ def dataset_info():
     dataset_dir = get_dataset_dir()
     images = []
     if dataset_dir.is_dir():
-        for file_path in sorted(dataset_dir.iterdir()):
-            if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS:
+        candidatos = [f for f in sorted(dataset_dir.iterdir())
+                      if f.is_file() and f.suffix.lower() in DATASET_EXTS]
+        # Saber si un clip trae pista de audio cuesta un ffprobe. En un modelo que
+        # genera imagen y sonido a la vez, un clip mudo entrena la mitad y la
+        # miniatura no lo delata, asi que merece la pena preguntarlo -- pero no a
+        # cualquier precio: por encima de este limite se devuelve None y la
+        # interfaz no pinta el indicador, en vez de tardar diez segundos en listar.
+        # Knowing whether a clip carries audio costs one ffprobe. On a model that
+        # generates picture and sound together a mute clip trains half of it and
+        # the thumbnail does not show it, so it is worth asking -- but not at any
+        # price: past this limit it returns None and the UI draws no badge rather
+        # than taking ten seconds to list the folder.
+        sondear_audio = sum(1 for f in candidatos
+                            if f.suffix.lower() in VIDEO_EXTS) <= 60
+        for file_path in candidatos:
+            if True:
                 txt_path = file_path.with_suffix(".txt")
                 caption = ""
                 if txt_path.exists():
@@ -844,6 +863,9 @@ def dataset_info():
                 images.append({
                     "file": file_path.name,
                     "kind": kind_of(file_path),
+                    "has_audio": (_has_audio(file_path)
+                                  if (kind_of(file_path) == "video" and sondear_audio)
+                                  else None),
                     "has_txt": txt_path.exists(),
                     "caption": caption,
                 })
@@ -889,24 +911,155 @@ def save_caption():
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@app.route("/api/clear-captions", methods=["POST"])
+def clear_captions():
+    """Borra el .txt de todas las muestras del dataset.
+
+    Se borra el FICHERO en vez de vaciarlo. Un .txt vacio cuenta como caption
+    presente: el Dataset Manager lo pintaria con el punto verde y la pre-cache lo
+    aceptaria como descripcion valida, entrenando con texto en blanco sin que
+    nadie se entere. Borrarlo deja el punto rojo, que es la verdad.
+
+    Deletes each sample's .txt rather than emptying it. An empty .txt counts as a
+    caption present: the Dataset Manager would draw the green dot and the
+    pre-cache would take it as a valid description, training on blank text
+    unnoticed. Deleting leaves the red dot, which is the truth.
+    """
+    try:
+        dataset_dir = get_dataset_dir()
+        if not dataset_dir.is_dir():
+            return jsonify({"status": "ok", "removed": 0})
+
+        borrados, errores = 0, []
+        for file_path in sorted(dataset_dir.iterdir()):
+            if not (file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS):
+                continue
+            txt = file_path.with_suffix(".txt")
+            if not txt.exists():
+                continue
+            try:
+                txt.unlink()
+                borrados += 1
+            except Exception as exc:
+                errores.append("{}: {}".format(txt.name, exc))
+
+        return jsonify({"status": "ok" if not errores else "partial",
+                        "removed": borrados, "errors": errores})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/api/batch-caption", methods=["POST"])
 def batch_caption():
+    """Escribe la palabra trigger, o una descripcion comun, en todos los captions.
+
+    Dos modos en el mismo sitio porque son la misma operacion sobre los mismos
+    ficheros. Con `common` se REEMPLAZA el caption entero; sin el, solo se
+    antepone el trigger a lo que ya hubiera.
+
+    Reemplazar tiene sentido cuando todas las muestras describen lo mismo, que es
+    el caso normal al trocear: 69 segmentos de la misma voz o del mismo martillo
+    no necesitan 69 textos distintos, y escribirlos a mano seria la parte mas
+    lenta de preparar el dataset. Al captioner de imagen eso no le vale -- cada
+    foto es distinta -- pero al audio si, porque Qwen3-VL no oye y no hay
+    generador automatico para esas tomas.
+
+    Writes the trigger word, or a common description, into every caption. Both
+    modes live here because they are the same operation on the same files: with
+    `common` the whole caption is REPLACED, without it the trigger is merely
+    prepended to whatever was there. Replacing makes sense when every sample
+    describes the same thing, which is the normal case after splitting -- 69
+    segments of one voice do not need 69 different texts, and typing them would
+    be the slowest part of preparing the dataset. It does not suit the image
+    captioner, where every photo differs, but it does suit audio: Qwen3-VL cannot
+    hear, so there is no automatic captioner for those takes.
+    """
     try:
         data = request.get_json(force=True)
         trigger = data.get("trigger_word", "").strip()
+        comun = str(data.get("common", "") or "").strip()
+        modo = str(data.get("mode", "append") or "append").strip().lower()
         dataset_dir = get_dataset_dir()
         count = 0
-        if trigger and dataset_dir.is_dir():
-            for file_path in dataset_dir.iterdir():
-                if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS:
-                    txt_path = file_path.with_suffix(".txt")
-                    text = ""
-                    if txt_path.exists():
-                        text = txt_path.read_text(encoding="utf-8").strip()
-                    if trigger.lower() not in text.lower():
-                        text = f"{trigger}, {text}".strip(", ")
-                    txt_path.write_text(text, encoding="utf-8")
-                    count += 1
+
+        if not dataset_dir.is_dir() or not (trigger or comun):
+            return jsonify({"status": "ok", "updated_count": 0})
+
+        for file_path in sorted(dataset_dir.iterdir()):
+            if not (file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS):
+                continue
+            txt_path = file_path.with_suffix(".txt")
+
+            actual = ""
+            if txt_path.exists():
+                actual = txt_path.read_text(encoding="utf-8").strip()
+
+            if not comun:
+                text = actual
+            elif modo == "remove":
+                # QUITAR un texto de todos los captions.
+                #
+                # Anteponer el trigger no tiene deshacer: si se pulsa Apply con la
+                # palabra equivocada, queda en los cien ficheros y la unica salida
+                # era borrarlos todos y volver a generarlos. Esto lo quita sin
+                # tocar el resto del caption.
+                #
+                # Se limpia tambien la puntuacion que rodeaba al texto, o quedaria
+                # " , una coma suelta al principio" o dos espacios en medio.
+                #
+                # REMOVING a text from every caption. Prepending the trigger has no
+                # undo: pressing Apply with the wrong word leaves it in a hundred
+                # files, and the only way out was deleting them all and generating
+                # again. This takes it out without touching the rest. The
+                # punctuation around it is cleaned too, or a stray leading comma or
+                # a double space would be left behind.
+                text = re.sub(re.escape(comun), "", actual, flags=re.IGNORECASE)
+                text = re.sub(r"\s{2,}", " ", text)
+                text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+                text = re.sub(r"^[\s,;:.]+", "", text)
+                text = re.sub(r"[,;:]\s*$", "", text).strip()
+            elif modo == "replace":
+                text = comun
+            elif comun.lower() in actual.lower():
+                # Idempotente: pulsar dos veces no debe duplicar la frase. Es la
+                # diferencia entre un boton que se puede volver a pulsar sin
+                # pensar y uno que hay que usar con cuidado.
+                # Idempotent: pressing twice must not duplicate the sentence. That
+                # is the difference between a button you can press again without
+                # thinking and one you have to be careful with.
+                text = actual
+            elif actual:
+                # Se anade al FINAL. Un caption de video describe lo que se ve; la
+                # frase de audio describe lo que se oye, y va detras porque ese es
+                # el orden de la secuencia empaquetada [texto | video | audio].
+                # Se cierra la frase anterior si no traia puntuacion, o las dos
+                # descripciones quedarian pegadas en una sola oracion falsa.
+                # Appended at the END. A video caption describes what is seen; the
+                # audio sentence describes what is heard, and follows because that
+                # is the packed sequence's order. The previous sentence is closed
+                # if it carried no punctuation, or the two descriptions would run
+                # together into one false sentence.
+                base = actual if actual[-1] in ".!?,;:" else actual + "."
+                text = "{} {}".format(base, comun)
+            else:
+                text = comun
+
+            # El trigger va SIEMPRE al principio y solo si falta. Anteponerlo dos
+            # veces seria enseñarle al modelo que la palabra se repite.
+            # The trigger always goes first and only when missing: prepending it
+            # twice would teach the model the word comes in pairs.
+            # En modo remove no se antepone nada: se acaba de pedir quitar una
+            # palabra, y volver a meter el trigger en la misma pasada dejaria al
+            # usuario sin saber que ha pasado.
+            # Nothing is prepended in remove mode: a word was just asked to be
+            # taken out, and re-inserting the trigger in the same pass would leave
+            # the user unsure what happened.
+            if modo != "remove" and trigger and trigger.lower() not in text.lower():
+                text = "{}, {}".format(trigger, text).strip(", ")
+
+            txt_path.write_text(text, encoding="utf-8")
+            count += 1
+
         return jsonify({"status": "ok", "updated_count": count})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -998,6 +1151,32 @@ def _ffbin(name):
     return found
 
 
+def _has_audio(path):
+    """True si el fichero trae al menos un stream de audio.
+
+    Se pregunta antes de convertir para poder decirlo en el parte: un clip mudo
+    entrena solo la imagen, y conviene que eso se vea en vez de descubrirlo
+    cuando el audio generado sale en silencio.
+
+    True if the file carries at least one audio stream. Asked before converting
+    so the report can say it: a mute clip trains picture only, and that is worth
+    seeing up front rather than discovering it when the generated audio is
+    silent.
+    """
+    probe = _ffbin("ffprobe")
+    if not probe:
+        return False
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return bool(out)
+    except Exception:
+        return False
+
+
 def _video_info(path):
     """(fps, frames, ancho, alto) del clip, o None si no se puede leer.
 
@@ -1044,6 +1223,219 @@ def h3_nearest_frames(ideal):
         return H3_BASE_FRAMES
     k = int(round((float(ideal) - H3_BASE_FRAMES) / H3_CLIP_LENGTH))
     return max(H3_BASE_FRAMES, H3_CLIP_LENGTH * k + H3_BASE_FRAMES)
+
+
+def _audio_silences(path, ffmpeg, sr=32000, hop=320, umbral_db=-38.0, min_ms=120):
+    """Centros de las zonas silenciosas, en segundos.
+
+    Cortar una toma de voz por un reloj parte palabras. Cortarla por un silencio
+    la parte por donde ya estaba partida: una pausa del habla. Sobre 13 tomas
+    reales, 65 de 67 cortes cayeron en un silencio.
+
+    Centres of the silent stretches, in seconds. Cutting a voice take by the
+    clock splits words; cutting it at a silence splits it where it was already
+    split -- at a pause. On 13 real takes, 65 of 67 cuts landed on a silence.
+    """
+    import numpy as np
+    try:
+        raw = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "1",
+             "-ar", str(sr), "-"], capture_output=True, timeout=600).stdout
+        a = np.frombuffer(raw, dtype=np.float32)
+    except Exception:
+        return []
+    if a.size < hop:
+        return []
+
+    n = a.size // hop
+    e = np.sqrt((a[: n * hop].reshape(n, hop) ** 2).mean(axis=1) + 1e-12)
+    mudo = 20.0 * np.log10(e + 1e-9) < umbral_db
+
+    zonas, ini = [], None
+    for i, m in enumerate(mudo):
+        if m and ini is None:
+            ini = i
+        elif not m and ini is not None:
+            if (i - ini) * hop / float(sr) * 1000.0 >= min_ms:
+                zonas.append(((ini + i) // 2) * hop / float(sr))
+            ini = None
+    if ini is not None and (n - ini) * hop / float(sr) * 1000.0 >= min_ms:
+        zonas.append(((ini + n) // 2) * hop / float(sr))
+    return zonas
+
+
+def _split_points(duracion, ventana, minimo, silencios):
+    """Los cortes [(inicio, fin), ...] en segundos.
+
+    Se elige el silencio MAS TARDIO que cabe en la ventana, no el mas cercano al
+    objetivo: asi cada toma se aprovecha al maximo y salen menos trozos. Cuando
+    no hay ningun silencio en la ventana se corta en seco y el llamante lo
+    contabiliza, porque un corte a media palabra hay que oirlo antes de entrenar
+    con el.
+
+    Cut points in seconds. The LATEST silence that fits the window is chosen
+    rather than the one nearest the target, so each take is used to the full and
+    fewer pieces come out. With no silence in the window it cuts hard and the
+    caller counts it, because a cut mid-word has to be heard before training.
+    """
+    cortes, pos, duros = [], 0.0, 0
+    while duracion - pos > ventana + 1e-6:
+        dentro = [x for x in silencios if pos + minimo <= x <= pos + ventana]
+        if dentro:
+            corte = max(dentro)
+        else:
+            corte = pos + ventana
+            duros += 1
+        cortes.append((pos, corte))
+        pos = corte
+    if duracion - pos >= minimo * 0.25:
+        cortes.append((pos, duracion))
+    return cortes, duros
+
+
+@app.route("/api/split-samples", methods=["POST"])
+def split_samples():
+    """Trocea las muestras largas en tomas de la duracion configurada.
+
+    UNA GRABACION LARGA NO ES UNA MUESTRA MEJOR, ES UNA MUESTRA CARA.
+    Medido sobre 252 s de voz en 13 ficheros: enteros son 13 muestras de hasta
+    2.624 filas de audio, 15 bloques residentes y 10,8 s/it. Troceados a 5,167 s
+    son 67 muestras de 414 filas, 27 bloques y 3,77 s/it. Casi tres veces mas
+    rapido, cinco veces mas muestras, y dentro del rango de duracion que H3
+    documenta (0,917 a 5,167 s) en vez de seis veces por encima.
+
+    El audio se corta por silencios; el video por fotograma exacto, arrastrando
+    su pista si la tiene. Los originales van a _originals, que ni el pre-cache ni
+    el Dataset Manager recorren.
+
+    A long recording is not a better sample, it is an expensive one. Measured on
+    252 s of speech in 13 files: whole, that is 13 samples of up to 2,624 audio
+    rows, 15 resident blocks and 10.8 s/it; split at 5.167 s it is 67 samples of
+    414 rows, 27 blocks and 3.77 s/it -- nearly three times faster, five times
+    the samples, and inside the duration range H3 documents rather than six times
+    beyond it. Audio is cut at silences, video on the exact frame carrying its
+    track along. Originals go to _originals.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        frames = int(data.get("frames", 0) or 0)
+        if not frames:
+            frames = int(read_json_file(PRECACHE_CONFIG, {}).get("num_frames", 124) or 124)
+        frames = max(H3_BASE_FRAMES, frames)
+        ventana = frames / 24.0
+        minimo = max(H3_BASE_FRAMES, H3_CLIP_LENGTH + H3_BASE_FRAMES) / 24.0
+
+        if get_status().get("running"):
+            return jsonify({"status": "error",
+                            "error": "A process is running. Stop it first. / "
+                                     "Hay un proceso en marcha. Detenlo primero."}), 409
+
+        ffmpeg = _ffbin("ffmpeg")
+        probe = _ffbin("ffprobe")
+        if not ffmpeg or not probe:
+            return jsonify({"status": "error",
+                            "error": "ffmpeg/ffprobe not found in PATH. / "
+                                     "No se encuentran ffmpeg/ffprobe en el PATH."}), 400
+
+        dataset_dir = get_dataset_dir()
+        if not dataset_dir.is_dir():
+            return jsonify({"status": "error", "error": "No dataset folder / No hay dataset"}), 404
+
+        muestras = sorted(f for f in dataset_dir.iterdir()
+                          if f.is_file() and f.suffix.lower() in DATASET_EXTS
+                          and f.suffix.lower() not in IMAGE_EXTS)
+        backup = dataset_dir / "_originals"
+        troceadas, saltadas, producidas, errores, avisos, detalles = 0, 0, 0, [], [], []
+
+        for m in muestras:
+            es_audio = m.suffix.lower() in AUDIO_EXTS
+            try:
+                dur = float(subprocess.run(
+                    [probe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(m)],
+                    capture_output=True, text=True, timeout=120).stdout.strip())
+            except Exception:
+                errores.append("{}: could not read the duration / no se pudo leer la duracion"
+                               .format(m.name))
+                continue
+
+            if dur <= ventana + 1e-6:
+                saltadas += 1
+                continue
+
+            sil = _audio_silences(m, ffmpeg) if es_audio else []
+            cortes, duros = _split_points(dur, ventana, minimo, sil)
+            if duros:
+                avisos.append("{}: {} cut(s) fell mid-content, no silence in the window / "
+                              "{} corte(s) cayeron a media toma, sin silencio en la ventana"
+                              .format(m.name, duros, duros))
+
+            backup.mkdir(exist_ok=True)
+            hechos = []
+            fallo = None
+            for i, (a, b) in enumerate(cortes, start=1):
+                destino = dataset_dir / "{}_{:02d}{}".format(m.stem, i, m.suffix)
+                if es_audio:
+                    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(m),
+                           "-ss", "{:.4f}".format(a), "-t", "{:.4f}".format(b - a),
+                           "-ar", "32000", "-ac", "2", str(destino)]
+                else:
+                    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(m),
+                           "-ss", "{:.4f}".format(a), "-frames:v", str(frames),
+                           "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+                           "-pix_fmt", "yuv420p",
+                           "-c:a", "aac", "-b:a", "192k", "-ar", "32000", "-ac", "2",
+                           str(destino)]
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=True)
+                    hechos.append(destino)
+                except subprocess.CalledProcessError as exc:
+                    det = (exc.stderr or "").strip().splitlines()
+                    fallo = det[-1] if det else "exit {}".format(exc.returncode)
+                    break
+                except Exception as exc:
+                    fallo = str(exc)
+                    break
+
+            if fallo:
+                # Sin todas las piezas no se toca el original: dejar la mitad de
+                # una grabacion troceada y la otra mitad no es peor que no haber
+                # empezado. / Without every piece the original is left alone:
+                # half a recording split and half not is worse than not starting.
+                for h in hechos:
+                    try:
+                        h.unlink()
+                    except Exception:
+                        pass
+                errores.append("{}: ffmpeg: {}".format(m.name, fallo))
+                continue
+
+            # El caption del original se copia a cada trozo: describe la voz o la
+            # accion, que no cambian al cortar. Si alguno necesita otro texto, se
+            # edita en el Dataset Manager. / The original's caption is copied to
+            # every piece: it describes the voice or the action, which cutting
+            # does not change.
+            txt = m.with_suffix(".txt")
+            if txt.exists():
+                try:
+                    contenido = txt.read_text(encoding="utf-8")
+                    for h in hechos:
+                        h.with_suffix(".txt").write_text(contenido, encoding="utf-8")
+                    shutil.move(str(txt), str(backup / txt.name))
+                except Exception:
+                    pass
+
+            shutil.move(str(m), str(backup / m.name))
+            troceadas += 1
+            producidas += len(hechos)
+            detalles.append("{} ({:.1f}s -> {} takes / tomas)".format(m.name, dur, len(hechos)))
+
+        return jsonify({"status": "ok" if not errores else "partial",
+                        "split": troceadas, "skipped": saltadas, "produced": producidas,
+                        "details": detalles, "warnings": avisos, "errors": errores,
+                        "backup": str(backup) if troceadas else None})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
 
 
 @app.route("/api/prepare-clips", methods=["POST"])
@@ -1172,6 +1564,7 @@ def convert_fps():
                                 "reescalara)".format(clip.name, width, height,
                                                      H3_SPATIAL_MULTIPLE, H3_SPATIAL_MULTIPLE))
 
+            tiene_audio = _has_audio(clip)
             necesita_fps = abs(fps - target) >= 0.05
             necesita_recuento = keep != frames
             if not necesita_fps and not necesita_recuento:
@@ -1192,11 +1585,58 @@ def convert_fps():
             # the exact rate; order matters, fps must see the corrected
             # timestamps. The trailing -frames:v guards against ffmpeg's internal
             # rounding leaving one extra frame.
+            # EL AUDIO SE CONSERVA Y SE NORMALIZA, NO SE TIRA.
+            #
+            # Aqui habia un -an, que borraba la pista. En un modelo que genera
+            # video Y audio de forma conjunta eso destruye la mitad del material,
+            # y ademas en silencio: el clip sigue reproduciendose, solo que mudo,
+            # y nada lo delata hasta que alguien va a buscar el audio.
+            #
+            # atempo estira el audio por el MISMO factor que setpts estira el
+            # video, pero invertido: setpts multiplica los TIEMPOS (>1 alarga) y
+            # atempo multiplica la VELOCIDAD (<1 alarga). Sin esa inversion la
+            # imagen y el sonido se separan un 2-3% a lo largo del clip, que en
+            # cinco segundos es un desfase audible en una sincronia labial.
+            #
+            # atempo solo admite [0,5 , 2,0] por pasada, asi que se encadena. Con
+            # los estiramientos de esta funcion (unos pocos por ciento) nunca hace
+            # falta, pero un clip a 8 fps llevado a 24 si lo necesitaria.
+            #
+            # 32 kHz y estereo es lo que pide el VAE de audio de H3 (sampling_rate
+            # 32000, empaquetado channel-major a 2 canales), asi que el clip queda
+            # ya en ese formato y la pre-cache no tiene que adivinarlo.
+            #
+            # There was an -an here, which deleted the track. On a model that
+            # generates video AND audio jointly that destroys half the material,
+            # silently. atempo stretches the audio by the SAME factor setpts
+            # stretches the video, inverted: setpts multiplies TIMESTAMPS (>1
+            # lengthens) while atempo multiplies SPEED (<1 lengthens). Without the
+            # inversion picture and sound drift 2-3% apart across the clip. atempo
+            # accepts only [0.5, 2.0] per pass, so it is chained. 32 kHz stereo is
+            # what H3's audio VAE expects, so the clip is left in that format.
+            velocidad = 1.0 / estiramiento
+            pasos_tempo = []
+            resto = velocidad
+            while resto < 0.5:
+                pasos_tempo.append(0.5)
+                resto /= 0.5
+            while resto > 2.0:
+                pasos_tempo.append(2.0)
+                resto /= 2.0
+            pasos_tempo.append(resto)
+            filtro_audio = ",".join("atempo={:.10f}".format(x) for x in pasos_tempo)
+
             cmd = [ffmpeg, "-v", "error", "-y", "-i", str(clip),
                    "-vf", "setpts=PTS*{:.10f},fps={:.6f}".format(estiramiento, target),
+                   "-af", filtro_audio,
                    "-frames:v", str(keep),
                    "-c:v", "libx264", "-crf", "16", "-preset", "medium",
-                   "-pix_fmt", "yuv420p", "-an", str(tmp)]
+                   "-pix_fmt", "yuv420p",
+                   # Sin pista de audio en la entrada estas opciones no generan
+                   # nada y ffmpeg no protesta. / With no audio stream in, these
+                   # produce nothing and ffmpeg does not complain.
+                   "-c:a", "aac", "-b:a", "192k", "-ar", "32000", "-ac", "2",
+                   str(tmp)]
 
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=True)
@@ -1208,6 +1648,8 @@ def convert_fps():
                 if necesita_recuento:
                     cambios.append("{} -> {} frames".format(frames, keep))
                 cambios.append("{:.2f}s -> {:.2f}s".format(duracion, duracion_nueva))
+                cambios.append("audio: {}".format(
+                    "32 kHz stereo" if tiene_audio else "none / sin pista"))
                 converted.append("{} ({})".format(clip.name, ", ".join(cambios)))
             except subprocess.CalledProcessError as exc:
                 # Sin el stderr de ffmpeg, un fallo aqui solo dice un codigo de

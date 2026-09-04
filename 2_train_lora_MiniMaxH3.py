@@ -3223,8 +3223,27 @@ def load_cached_entries(cache_dir, audio_channels):
         if prompt_result is None:
             continue
 
+        # kind viene del _info.json de la muestra. Interesa uno solo: "audio",
+        # que marca una toma sin imagen, donde el latente de video es un unico
+        # fotograma negro puesto ahi para no tener que soportar V=0 en el
+        # empaquetado, el desempaquetado y las previews. Esa fila NO debe
+        # aprenderse: si entra en la loss, el LoRA aprende a generar negro.
+        # kind comes from the sample's _info.json. Only one value matters:
+        # "audio", marking a take with no picture, where the video latent is a
+        # single black frame put there to avoid supporting V=0 across packing,
+        # unpacking and previews. That row must NOT be learned: if it enters the
+        # loss, the LoRA learns to generate black.
+        _kind = "video"
+        try:
+            with open(os.path.join(cache_dir, "{}_info.json".format(base)),
+                      "r", encoding="utf-8") as fh:
+                _kind = str(json.load(fh).get("kind", "video") or "video")
+        except Exception:
+            pass
+
         entries.append({
             "name": base,
+            "kind": _kind,
             "video": video_latent.to(torch.bfloat16),
             "audio": audio_latent.to(torch.bfloat16),
             "prompt": prompt_result,
@@ -5024,11 +5043,25 @@ def cache_sequence_tokens(cache_dir):
                 continue
             try:
                 with open(os.path.join(cache_dir, nombre), "r", encoding="utf-8") as fh:
-                    shape = json.load(fh).get("latent_shape")
+                    _info = json.load(fh)
+                shape = _info.get("latent_shape")
+                forma_audio = _info.get("audio_latent_shape")
             except Exception:
                 continue
             if shape and len(shape) >= 5:
-                mayor = max(mayor, int(shape[2]) * (int(shape[3]) // 2) * (int(shape[4]) // 2))
+                tk = int(shape[2]) * (int(shape[3]) // 2) * (int(shape[4]) // 2)
+                # Las filas de audio van en la MISMA secuencia empaquetada
+                # [texto | video | audio], asi que cuentan igual que las de video
+                # para la VRAM. Un clip de 124 fotogramas son 414 filas: un 31%
+                # mas de secuencia que ignorarlas costaria tres bloques
+                # residentes de mas y un OOM a mitad de corrida.
+                # Audio rows live in the SAME packed sequence, so they count like
+                # video rows for VRAM. A 124 frame clip is 414 rows: 31% more
+                # sequence, which ignoring would cost three resident blocks too
+                # many and an OOM mid-run.
+                if forma_audio and len(forma_audio) >= 3:
+                    tk += int(forma_audio[2])
+                mayor = max(mayor, tk)
     except Exception:
         return 0
 
@@ -8647,7 +8680,46 @@ def train_minimaxh3():
                     except Exception as _e:
                         log_print("[FIT-PROBE] fallo: {}".format(_e), flush=True)
 
-                if step <= max(2, FLOW_CONV_DEBUG_STEPS):
+                # Una toma de SOLO AUDIO no tiene imagen que aprender: su fila de
+                # video es el fotograma negro de relleno. Entrenarla enseñaria
+                # exactamente eso, negro, y ese daño no se queda en las tomas de
+                # audio -- va a los mismos pesos LoRA que usan las de video.
+                # An AUDIO-ONLY take has no picture to learn: its video row is the
+                # black filler frame. Training on it would teach exactly that, and
+                # the damage does not stay local -- it lands in the same LoRA
+                # weights the video takes use.
+                solo_audio = str(entry.get("kind", "video")) == "audio"
+
+                # El mismo diagnostico para el AUDIO. Es la unica senal que dice,
+                # en el primer paso y sin esperar una hora, si la cadena entera
+                # esta bien conectada: si el coseno sale cerca de +1 el modelo ya
+                # predice la direccion del flujo, y si sale cerca de 0 hay algo
+                # roto entre el latente y la loss. Con solo audio el bloque de
+                # abajo mira `pred_video`, que es el fotograma negro de relleno, y
+                # daria un numero sin significado.
+                #
+                # The same probe for AUDIO. It is the one signal that says, on the
+                # first step and without waiting an hour, whether the whole chain
+                # is wired: a cosine near +1 means the model already predicts the
+                # flow direction, near 0 means something is broken between latent
+                # and loss. On audio-only the block below looks at `pred_video`,
+                # which is the black filler frame, and would report a meaningless
+                # number.
+                if (step <= max(2, FLOW_CONV_DEBUG_STEPS)
+                        and pred_audio is not None and target_audio is not None):
+                    _pa = pred_audio.detach().float().reshape(1, -1)
+                    _ta = target_audio.detach().float().reshape(1, -1)
+                    print(
+                        "[FLOW-CONV][AUDIO] step={} | cosine(pred,target)={:+.4f} | "
+                        "std pred/target={:.2f}/{:.2f} | rows={}".format(
+                            step,
+                            torch.nn.functional.cosine_similarity(_pa, _ta).item(),
+                            float(_pa.std()), float(_ta.std()),
+                            int(target_audio.shape[1]) if target_audio.ndim > 1 else -1),
+                        flush=True)
+                    del _pa, _ta
+
+                if step <= max(2, FLOW_CONV_DEBUG_STEPS) and not solo_audio:
                     pred_flat = pred_video.detach().float().reshape(1, -1)
                     targ_flat = target_video.detach().float().reshape(1, -1)
 
@@ -8675,7 +8747,20 @@ def train_minimaxh3():
                 if not USE_AUDIO_LOSS:
                     pred_audio = None
 
-                if USE_AUDIO_LOSS and pred_audio is not None and target_audio is not None:
+                if solo_audio and USE_AUDIO_LOSS and pred_audio is not None \
+                        and target_audio is not None:
+                    loss = mse_loss_chunked(pred_audio, target_audio)
+                elif solo_audio:
+                    # Sin loss de audio, una toma de solo audio no aporta nada:
+                    # se salta en vez de entrenar el relleno negro.
+                    # With no audio loss, an audio-only take contributes nothing:
+                    # skip it rather than train the black filler.
+                    raise RuntimeError(
+                        "Audio-only sample '{}' with use_audio_loss=False: nothing "
+                        "to train. Enable Train Audio. / Muestra de solo audio '{}' "
+                        "con use_audio_loss=False: no hay nada que entrenar. "
+                        "Activa Train Audio.".format(entry.get("name"), entry.get("name")))
+                elif USE_AUDIO_LOSS and pred_audio is not None and target_audio is not None:
                     loss_video = mse_loss_chunked(pred_video, target_video)
                     loss_audio = mse_loss_chunked(pred_audio, target_audio)
                     loss = (loss_video + loss_audio) * 0.5

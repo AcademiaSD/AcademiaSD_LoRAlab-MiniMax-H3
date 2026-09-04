@@ -531,7 +531,17 @@ DEFAULTS = {
     # --- new / nuevos ---
     "strict_load": True,          # abort on any weight that did not load / abortar si falta algun peso
     "require_captions": True,     # abort if any image has no .txt / abortar si alguna imagen no tiene .txt
-    "write_audio_latent": True,   # keep writing *_audio_latent.pt for script 2 / seguir escribiendo para el script 2
+    "write_audio_latent": True,
+
+    # Codificar de verdad la pista de audio del clip, en vez de escribir el
+    # relleno de silencio. Se apaga solo para reproducir el comportamiento
+    # anterior o si el VAE de audio no esta disponible; un clip sin pista cae al
+    # relleno por su cuenta, sin que haya que tocar esto.
+    # Actually encode the clip's audio track instead of writing the silent
+    # placeholder. Turn it off only to reproduce the old behaviour or when the
+    # audio VAE is missing; a clip with no track falls back to the placeholder on
+    # its own.
+    "encode_audio": True,   # keep writing *_audio_latent.pt for script 2 / seguir escribiendo para el script 2
     "audio_latent_channels": 32,  # H3 audio VAE latent dim / dim latente del VAE de audio H3
     "run_selftests": True,
     # Backfill for an NF4 export that only contains Linear layers.
@@ -618,6 +628,7 @@ LOW_RAM_THRESHOLD_GB = float(cfg_get("low_ram_threshold_gb", DEFAULTS["low_ram_t
 STRICT_LOAD = _cfg_bool("strict_load", DEFAULTS["strict_load"])
 REQUIRE_CAPTIONS = _cfg_bool("require_captions", DEFAULTS["require_captions"])
 WRITE_AUDIO_LATENT = _cfg_bool("write_audio_latent", DEFAULTS["write_audio_latent"])
+ENCODE_AUDIO = _cfg_bool("encode_audio", DEFAULTS.get("encode_audio", True))
 AUDIO_LATENT_CHANNELS = int(cfg_get("audio_latent_channels", DEFAULTS["audio_latent_channels"]))
 RUN_SELFTESTS = _cfg_bool("run_selftests", DEFAULTS["run_selftests"])
 FETCH_MISSING_FROM_HUB = _cfg_bool("fetch_missing_from_hub", DEFAULTS["fetch_missing_from_hub"])
@@ -2502,6 +2513,180 @@ def encode_clip_latent(vae, frames_uint8):
     return latent.detach().to(torch.bfloat16).cpu().contiguous()
 
 
+# Geometria del VAE de audio de H3, leida de su config.json:
+#   sampling_rate 32000, encoder_rates [2,4,4,5,5] -> 2*4*4*5*5 = 800
+#   32000 / 800 = 40 latentes por segundo y canal.
+# Esos 40/s hacen que las duraciones validas de audio COINCIDAN exactamente con
+# la rejilla 17n+5 de video a 24 fps: 22 fotogramas son 0,917 s, 124 son 5,167 s.
+# No hay dos geometrias que cuadrar, es la misma vista desde el otro VAE.
+#
+# H3's audio VAE geometry, read from its config.json. Those 40 latents/s make the
+# valid audio durations coincide exactly with the video 17n+5 grid at 24 fps, so
+# there are not two geometries to reconcile -- it is the same one seen through
+# the other VAE.
+AUDIO_SR = 32000
+AUDIO_LATENTS_PER_SEC = 40.0
+
+
+def load_h3_audio_vae(nf4_model_id):
+    """Carga el VAE de audio, o None si no esta. / Load the audio VAE, or None."""
+    ruta = os.path.join(nf4_model_id, "audio_vae")
+    if not os.path.isdir(ruta):
+        log_dev(L("[AUDIO] no audio_vae/ under {}; audio will stay silent.",
+                  "[AUDIO] no hay audio_vae/ en {}; el audio se quedara en silencio.")
+                .format(nf4_model_id))
+        return None
+    try:
+        from diffusers.models.autoencoders.autoencoder_kl_minimax_h3_audio import (
+            AutoencoderKLMiniMaxH3Audio,
+        )
+        vae = AutoencoderKLMiniMaxH3Audio.from_pretrained(ruta, torch_dtype=torch.float32)
+        vae.eval().requires_grad_(False)
+        return vae.to("cuda") if torch.cuda.is_available() else vae
+    except Exception as exc:
+        log_dev(L("[AUDIO] could not load the audio VAE ({}); audio will stay silent.",
+                  "[AUDIO] no se pudo cargar el VAE de audio ({}); el audio se quedara en silencio.")
+                .format(exc))
+        return None
+
+
+def audio_duration(path):
+    """Duracion en segundos de un fichero de audio, o None."""
+    probe = _ffbin("ffprobe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+        return float(out)
+    except Exception:
+        return None
+
+
+def audio_frames_for(duracion, objetivo=0):
+    """Fotogramas 17n+5 equivalentes a `duracion` segundos a 24 fps.
+
+    H3 no tiene una rejilla de audio aparte: las duraciones validas de una pista
+    son las mismas 17n+5 del video vistas a 24 fps (22 fotogramas = 0,917 s, 124
+    = 5,167 s). Se redondea al valor mas cercano, no al inferior, porque bajar
+    corta el final de la toma y en una frase el final es donde esta la cadencia.
+    Un 3% de mas o de menos en la velocidad no se nota; media palabra perdida si.
+
+    Se redondea HACIA ARRIBA, no al mas cercano. El hueco que sobra se rellena
+    con silencio en read_audio_pcm, asi que redondear arriba no cuesta nada:
+    unas centesimas de silencio al final de la toma. Redondear al mas cercano
+    cuesta lo contrario -- recorta la toma -- y sobre 13 tomas reales de voz
+    cortaba 5. Perder el final de una frase es perder la cadencia, que es
+    justamente lo que se quiere clonar.
+    """
+    if not duracion or duracion <= 0:
+        return None
+    if objetivo and objetivo >= H3_BASE_FRAMES:
+        return h3_valid_frames(int(round(objetivo)), 0)
+    ideal = duracion * 24.0
+    k = int(math.ceil((ideal - H3_BASE_FRAMES) / float(H3_CLIP_LENGTH) - 1e-9))
+    return max(H3_BASE_FRAMES, H3_CLIP_LENGTH * max(0, k) + H3_BASE_FRAMES)
+
+
+def probe_fps(path):
+    """Fotogramas por segundo reales del clip, o None. / Real clip fps, or None."""
+    probe = _ffbin("ffprobe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+        num, _, den = out.partition("/")
+        return float(num) / float(den or 1)
+    except Exception:
+        return None
+
+
+def read_audio_pcm(path, num_frames, fps=24.0):
+    """Pista del clip como [2, N] float32 a 32 kHz, o None si no hay.
+
+    N se fija por la geometria, no por lo que dure el fichero: se pide
+    exactamente el audio que corresponde a los `num_frames` que se van a
+    entrenar. Si la pista es mas corta se rellena con ceros y si es mas larga se
+    corta, porque el desfase entre imagen y sonido tiene que ser cero y no
+    "aproximadamente cero".
+
+    The clip's track as [2, N] float32 at 32 kHz, or None. N is set by the
+    geometry rather than the file's duration: exactly the audio matching the
+    `num_frames` that will be trained. Short tracks are zero-padded and long ones
+    truncated, because the offset between picture and sound has to be zero, not
+    approximately zero.
+    """
+    ffmpeg = _ffbin("ffmpeg")
+    if not ffmpeg:
+        return None
+
+    objetivo = int(round(num_frames / float(fps) * AUDIO_SR))
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path),
+             "-map", "0:a:0", "-f", "f32le", "-ac", "2", "-ar", str(AUDIO_SR), "-"],
+            capture_output=True, timeout=300,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+
+    a = np.frombuffer(proc.stdout, dtype=np.float32)
+    a = a[: (a.size // 2) * 2].reshape(-1, 2).T          # [2, N]
+    if a.shape[1] == 0:
+        return None
+    if a.shape[1] < objetivo:
+        a = np.pad(a, ((0, 0), (0, objetivo - a.shape[1])))
+    return np.ascontiguousarray(a[:, :objetivo])
+
+
+def encode_audio_latent(vae, pcm):
+    """[2, N] -> latente normalizado [1, 32, 2*T], los canales uno tras otro.
+
+    El VAE solo acepta mono ([B,1,muestras]), asi que cada canal se codifica por
+    separado y se concatenan en el eje temporal. Ese orden -- todo el izquierdo y
+    luego todo el derecho -- es el que espera el empaquetado del entrenador, que
+    reparte las A filas de audio en `audio_channels` grupos de A/2.
+
+    Se toma la MEDIA de la distribucion, no una muestra: una cache tiene que dar
+    el mismo latente cada vez que se lee, y ademas es lo que hace el VAE de
+    video unas lineas mas arriba.
+
+    [2, N] -> normalized latent [1, 32, 2*T], channels back to back. The VAE only
+    accepts mono, so each channel is encoded separately and concatenated along
+    time; that order -- all of left then all of right -- is what the trainer's
+    packing expects, splitting the A audio rows into `audio_channels` groups of
+    A/2. The distribution MEAN is taken rather than a sample: a cache has to
+    return the same latent every read, and it matches what the video VAE does.
+    """
+    device = next(vae.parameters()).device
+    lm = torch.tensor(vae.config.latents_mean, dtype=torch.float32, device=device).view(1, -1, 1)
+    ls = torch.tensor(vae.config.latents_std, dtype=torch.float32, device=device).view(1, -1, 1)
+
+    trozos = []
+    for canal in range(pcm.shape[0]):
+        x = torch.from_numpy(pcm[canal]).to(device).view(1, 1, -1)
+        with torch.inference_mode():
+            salida = vae.encode(x)
+        dist = getattr(salida, "latent_dist", None)
+        lat = dist.mode() if dist is not None else (
+            salida.latent if hasattr(salida, "latent") else salida[0])
+        trozos.append(((lat.float() - lm) / ls).cpu())
+        del x, salida, lat
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return torch.cat(trozos, dim=2).to(torch.bfloat16)
+
+
 def read_audio_channels(nf4_model_id, default=32):
     """Read the audio VAE latent dim (H3 = 32) / Lee la dim latente del VAE de audio (H3 = 32)."""
     candidates = [
@@ -2630,7 +2815,7 @@ def preprocess_minimaxh3():
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     images = sorted(f for f in os.listdir(DATASET_PATH)
-                    if f.lower().endswith(IMAGE_EXTS + VIDEO_EXTS))
+                    if f.lower().endswith(IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS))
     if not images:
         raise RuntimeError(L("No images in {}", "No hay imagenes en {}").format(DATASET_PATH))
 
@@ -2669,6 +2854,7 @@ def preprocess_minimaxh3():
         diag_warn(msg)
 
     audio_channels = read_audio_channels(NF4_MODEL_ID, AUDIO_LATENT_CHANNELS)
+    audio_vae = load_h3_audio_vae(NF4_MODEL_ID) if (WRITE_AUDIO_LATENT and ENCODE_AUDIO) else None
     DIAG["config"]["audio_latent_channels"] = audio_channels
 
     # ==================================================================
@@ -2891,6 +3077,37 @@ def preprocess_minimaxh3():
             frames_uint8 = read_video_frames(ruta_media, keep, bw, bh)
             video_latent = encode_clip_latent(vae, frames_uint8)
             del frames_uint8
+        elif is_audio(filename):
+            # SOLO AUDIO.
+            #
+            # El video no se elimina, se reduce a UN fotograma negro en el bucket
+            # mas pequeno que permite la geometria. El empaquetado tolera V=0
+            # (`if V > 0` en build_minimax_packed_indices), pero esa ausencia se
+            # propaga al latent_shape, al desempaquetado y a las previews, y
+            # arreglar los tres para ahorrar cuatro tokens de 566 no sale a
+            # cuenta. Lo que SI hay que hacer es que esa fila no reciba
+            # gradiente, o el LoRA aprenderia a generar negro: de eso se encarga
+            # el entrenador al ver kind == "audio".
+            #
+            # AUDIO ONLY. Video is not removed but reduced to ONE black frame in
+            # the smallest bucket the geometry allows. The packing tolerates V=0,
+            # but that absence propagates to latent_shape, unpacking and previews,
+            # and fixing all three to save four tokens out of 566 does not pay.
+            # What DOES matter is that the row gets no gradient, or the LoRA would
+            # learn to generate black; the trainer handles that on kind == "audio".
+            dur = audio_duration(ruta_media)
+            keep = audio_frames_for(dur, NUM_FRAMES)
+            if keep is None:
+                raise RuntimeError(L("Could not read the audio: {}",
+                                     "No se pudo leer el audio: {}").format(filename))
+            log_dev("    Audio: {:.3f}s -> {} fotogramas equivalentes ({:.3f}s a 24 fps)".format(
+                dur, keep, keep / 24.0))
+
+            bw = bh = MULTIPLE
+            negro = Image.new("RGB", (bw, bh), (0, 0, 0))
+            with torch.inference_mode():
+                video_latent = encode_video_latent(vae, negro)
+            del negro
         else:
             image = Image.open(ruta_media).convert("RGB")
             bw, bh = bucket_size(image.width, image.height)
@@ -2921,7 +3138,37 @@ def preprocess_minimaxh3():
                 .format(tuple(video_latent.shape), float(lat.mean()), float(lat.std())))
 
         if WRITE_AUDIO_LATENT:
-            audio_latent = make_audio_latent(audio_channels)
+            audio_latent = None
+            es_audio = is_audio(filename)
+            fps_real = probe_fps(ruta_media) if is_video(filename) else None
+            fps_ok = es_audio or (fps_real is not None and abs(fps_real - FRAME_RATE) < 0.05)
+            if is_video(filename) and audio_vae is not None and not fps_ok:
+                # Sin 24 fps el audio y la imagen cubren tramos de tiempo
+                # distintos: `keep` fotogramas a 30 fps son 4,1 s de sonido que el
+                # modelo reproducira en 5,2. Antes que escribir un latente
+                # desincronizado en silencio, se avisa y se deja el relleno.
+                # Without 24 fps, picture and sound cover different spans: `keep`
+                # frames at 30 fps are 4.1 s of audio the model will play over
+                # 5.2. Rather than silently writing a desynced latent, warn and
+                # leave the placeholder.
+                log_dev(L("    Clip at {} fps, not {}: audio skipped. Run Prepare clips first.",
+                          "    Clip a {} fps, no {}: audio omitido. Pasa antes Prepare clips.")
+                        .format("?" if fps_real is None else round(fps_real, 2), FRAME_RATE))
+            if audio_vae is not None and (is_video(filename) or es_audio) and fps_ok:
+                pcm = read_audio_pcm(ruta_media, keep, FRAME_RATE)
+                if pcm is not None:
+                    audio_latent = encode_audio_latent(audio_vae, pcm)
+                    log_dev(L("    Audio latent: {}  mean={:.4f} std={:.4f}   [{} latents/channel]",
+                              "    Latente audio: {}  media={:.4f} std={:.4f}   [{} latentes/canal]")
+                            .format(tuple(audio_latent.shape), float(audio_latent.float().mean()),
+                                    float(audio_latent.float().std()), audio_latent.shape[2] // 2))
+                    del pcm
+                else:
+                    log_dev(L("    No audio track: writing silence, this clip trains picture only.",
+                              "    Sin pista de audio: se escribe silencio, este clip solo entrena imagen."))
+            if audio_latent is None:
+                audio_latent = make_audio_latent(audio_channels)
+            forma_audio = list(audio_latent.shape)
             torch.save(audio_latent, audio_path)
             del audio_latent
 
@@ -2949,6 +3196,17 @@ def preprocess_minimaxh3():
                 "video_latent": os.path.basename(video_path),
                 "audio_latent": os.path.basename(audio_path) if WRITE_AUDIO_LATENT else None,
                 "latent_shape": list(video_latent.shape),
+                # Forma del latente de AUDIO, [1, 32, filas]. Se guarda porque el
+                # plan de VRAM del entrenador necesita contar esas filas: con
+                # audio la secuencia crece un 31% y repartir bloques como si no
+                # existiera lleva directo al OOM. Un relleno de silencio son 1-2
+                # filas, o sea que el plan tambien acierta cuando no hay audio.
+                # AUDIO latent shape, [1, 32, rows]. Recorded because the trainer's
+                # VRAM plan has to count those rows: with audio the sequence grows
+                # 31%, and handing out blocks as if it were not there leads
+                # straight to an OOM. A silent placeholder is 1-2 rows, so the plan
+                # is right in that case too.
+                "audio_latent_shape": (forma_audio if WRITE_AUDIO_LATENT else None),
                 # Fotogramas de PIXEL que se cachearon: 1 en una imagen, 17n+5 en
                 # un clip. El entrenador lo necesita para calcular las filas de
                 # audio, que dependen de la duracion y no del numero de latentes.
@@ -2958,7 +3216,8 @@ def preprocess_minimaxh3():
                 "num_frames": int(video_latent.shape[2] and
                                   (h3_pixel_frames(video_latent.shape[2])
                                    if video_latent.shape[2] > 1 else 1)),
-                "kind": "video" if is_video(filename) else "image",
+                "kind": ("audio" if is_audio(filename)
+                         else ("video" if is_video(filename) else "image")),
                 "prompt_structure": prompt_structure,
             },
             os.path.join(CACHE_DIR, "{}_info.json".format(base)),

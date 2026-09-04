@@ -159,6 +159,28 @@
         .ds-grid.compact { grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); }
         .ds-grid.large { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
         .ds-grid.hidden { display: none; }
+        /* Una toma de audio no tiene miniatura. En vez de un hueco gris se pone
+           el reproductor: lo unico que se necesita comprobar de una toma de voz
+           es como suena y cuanto dura, y ambas cosas estan ahi.
+           An audio take has no thumbnail. Rather than a grey blank, the player
+           goes in: the only things worth checking on a voice take are how it
+           sounds and how long it is, and both are right there. */
+        .ds-audio { display: flex; flex-direction: column; align-items: center;
+                    justify-content: center; gap: 8px; height: 100%;
+                    background: #0f172a; padding: 8px; }
+        /* Aqui no hay miniatura que tapar: el icono ES la tarjeta, asi que se
+           deja crecer hasta donde permita la altura del modo de rejilla.
+           Nothing to cover here: the icon IS the card, so it grows to whatever
+           the grid mode's height allows. */
+        .ds-audio .ds-audio-icon { width: auto; max-width: 78%; max-height: 62%;
+                                   height: auto; object-fit: contain; opacity: 0.9; }
+        .ds-audio audio { width: 100%; height: 32px; }
+        /* Indicador de pista de audio sobre la miniatura de un clip. Un clip mudo
+           entrena solo la mitad de un modelo que genera imagen Y sonido, y eso no
+           se ve mirando el video: el icono lo dice de un vistazo, sin abrir nada.
+           Audio-track badge over a clip's thumbnail. A mute clip trains only half
+           of a model that generates picture AND sound, and the video does not show
+           that: the badge says it at a glance. */
         /* Tirador para estirar la rejilla del dataset. Los 380 px de max-height
            de arriba son el SUELO: se puede agrandar cuanto se quiera y volver a
            comprimir hasta ahi, que es el tamano de siempre.
@@ -183,6 +205,34 @@
         .ds-grid.large .img-wrapper { height: 165px; }
         .img-wrapper img,
         .img-wrapper video { width: 100%; height: 100%; object-fit: cover; display: block; }
+        /* El selector lleva `img` a proposito: `.img-wrapper img` de la linea de
+           arriba es mas especifica que una sola clase, asi que un `.ds-audio-badge`
+           suelto heredaba width:100% / object-fit:cover y el altavoz cubria la
+           miniatura entera. Con `img.ds-audio-badge` gana esta.
+           The selector carries `img` on purpose: `.img-wrapper img` above is more
+           specific than a lone class, so a bare `.ds-audio-badge` inherited
+           width:100% / object-fit:cover and the speaker covered the whole
+           thumbnail. `img.ds-audio-badge` wins. */
+        .img-wrapper img.ds-audio-badge {
+            position: absolute; right: 6px;
+            /* Justo encima de la banda del nombre, no sobre ella. La banda mide
+               unos 19 px (3+3 de padding mas una linea de 0,68rem) y lleva el
+               mismo z-index, ademas de ir despues en el DOM, asi que pintaba por
+               encima y cortaba el icono por la mitad. Subirlo se lee mejor que
+               superponerlo: tapar el nombre del fichero fue justo el problema que
+               resolvimos con los marcos de fotograma.
+               Just above the filename band, not over it. The band is about 19px
+               and shares the z-index while coming later in the DOM, so it painted
+               over the icon and cut it in half. Lifting it reads better than
+               overlapping: covering the filename is exactly the problem the film
+               sprocket borders were introduced to solve. */
+            bottom: 24px;
+            width: 30px; height: auto; object-fit: contain;
+            z-index: 3; pointer-events: none;
+            filter: drop-shadow(0 1px 3px rgba(0,0,0,.9));
+        }
+        .ds-grid.compact .img-wrapper img.ds-audio-badge { width: 20px; }
+        .ds-grid.large .img-wrapper img.ds-audio-badge { width: 38px; }
         /* Marco de pelicula para los clips: dos tiras con perforaciones a los
            lados, como un fotograma de 35 mm. Sustituye a la etiqueta VIDEO, que
            caia justo encima de la barra del nombre y lo tapaba.
@@ -656,6 +706,13 @@
                             <input type="number" step="1" min="0" id="train_ram_limit_gb" value="0" title="Only used in Auto mode. Ceiling for TOTAL system RAM, the figure you see in Task Manager. 0 = no limit, everything stays in RAM. Above 0, the blocks that would push the machine past it are parked in a memory-mapped file instead. / Solo se usa en modo Auto. Techo de la RAM TOTAL del sistema, la cifra que ves en el Administrador de tareas. 0 = sin limite, todo se queda en RAM. Por encima de 0, los bloques que pasarian de ese techo se aparcan en un fichero mapeado en memoria.">
                         </div>
                         <div class="form-group">
+                            <label>Train Audio / Entrenar Audio:</label>
+                            <label class="chk-inline" title="Trains the audio branch as well as the video one: the loss becomes the average of both. Needs a pre-cache built with clips that HAVE an audio track -- with the silent placeholder this only makes training slower for nothing. The audio rows ride in the same packed sequence, so a 124 frame clip goes from 1,332 to 1,746 tokens: about 1 GB more VRAM and 1 s/it. The VRAM plan already counts them. / Entrena la rama de audio ademas de la de video: la loss pasa a ser la media de las dos. Necesita una pre-cache hecha con clips que TENGAN pista de audio; con el relleno de silencio esto solo hace el entrenamiento mas lento sin ganar nada. Las filas de audio van en la misma secuencia empaquetada, asi que un clip de 124 fotogramas pasa de 1.332 a 1.746 tokens: cerca de 1 GB mas de VRAM y 1 s/it. El plan de VRAM ya las cuenta.">
+                                <input type="checkbox" id="train_use_audio_loss">
+                                <span>Enable / Activar</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
                             <label>Sage Attention 2.2.0 (previews only):</label>
                             <label class="chk-inline"
                                    title="DOES NOTHING WHEN TRAINING, and the trainer says so in the log. SageAttention ships inference kernels with no backward pass: its output comes back with requires_grad=False, so the q/k/v LoRAs would receive zero gradient and the LoRA would train wrong without a single error message. Native attention is used instead, which is already memory-efficient. The setting is kept for previews, where there is no backward and Sage would be usable. / NO HACE NADA AL ENTRENAR, y el entrenador lo dice en el log. SageAttention son kernels de inferencia sin backward: su salida vuelve con requires_grad=False, asi que los LoRA de q/k/v se quedarian sin gradiente y el LoRA saldria mal sin un solo mensaje de error. Se usa la atencion nativa, que ya es eficiente en memoria. El ajuste se conserva para las previews, donde no hay backward y Sage si valdria.">
@@ -774,8 +831,27 @@
                         <button type="button" class="btn btn-secondary btn-sm" onclick="setGridMode('normal')">Normal</button>
                         <button type="button" class="btn btn-secondary btn-sm" onclick="setGridMode('large')">Expand / Grande</button>
                         <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-ds" onclick="toggleDatasetGrid()">Hide / Ocultar</button>
-                        <button type="button" class="btn btn-warning btn-sm" onclick="addTriggerToAllCaptions()">+ Trigger All</button>
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="loadDatasetInfo()">Refresh / Actualizar</button>
+                        <select class="ds-caption-kind" id="ds-common-mode"
+                                title="What to do with the common description. Append leaves the existing caption alone and adds the sentence at the end, which is what you want when a captioner already described the picture and you only need to add what is heard. Replace wipes the caption and writes just this text, for takes that all describe the same thing. Appending twice does not duplicate the sentence. / Que hacer con la descripcion comun. Anadir deja el caption existente y pone la frase al final, que es lo que quieres cuando un generador ya describio la imagen y solo falta lo que se oye. Reemplazar borra el caption y escribe solo este texto, para tomas que describen todas lo mismo. Anadir dos veces no duplica la frase.">
+                            <option value="append">Append / A&ntilde;adir</option>
+                            <option value="replace">Replace / Reemplazar</option>
+                            <option value="remove">Remove / Quitar</option>
+                        </select>
+                        <input type="text" class="ds-search" id="ds-common-caption" style="min-width:300px;"
+                               placeholder="Common description / Descripcion comun"
+                               title="A single description written into EVERY caption, replacing what was there. The trigger word is prepended, as everywhere else. Meant for datasets where all the samples describe the same thing: the takes that come out of Split, or voice recordings, which have no automatic captioner because Qwen3-VL cannot hear. Leave it empty and the button beside it only prepends the trigger, as it always did. / Una sola descripcion que se escribe en TODOS los captions, reemplazando lo que hubiera. La palabra trigger se antepone, como en el resto del programa. Pensado para datasets donde todas las muestras describen lo mismo: las tomas que salen de Split, o grabaciones de voz, que no tienen generador automatico porque Qwen3-VL no oye. Dejalo vacio y el boton de al lado solo antepone el trigger, como siempre.">
+                        <button type="button" class="btn btn-warning btn-sm" onclick="addTriggerToAllCaptions()"
+                                title="Applies to EVERY caption in the dataset at once: puts the trigger word at the front where it is missing, and adds or replaces the common description according to the selector. With the description box empty it only does the trigger, which is what this button always did. Pressing it twice changes nothing the second time. / Aplica de una vez a TODOS los captions del dataset: pone la palabra trigger al principio donde falte, y anade o reemplaza la descripcion comun segun el selector. Con la caja de descripcion vacia solo hace lo del trigger, que es lo que este boton hacia siempre. Pulsarlo dos veces no cambia nada la segunda.">
+                            Apply to All / Aplicar a todos</button>
+                        <button type="button" class="btn btn-warning btn-sm" id="btn-split" onclick="splitSamples()"
+                                title="Splits every sample longer than the Frames setting into consecutive takes of that length, so one long recording becomes many training samples. Works on audio, video and video+audio. Audio is cut at silences whenever one falls inside the window, so takes end on a pause instead of mid-word; video is cut on the frame. The leftover tail is kept if it reaches the minimum, and the originals are moved to _originals. A 30 s recording at 124 frames becomes six or seven takes: more samples, shorter sequences, and inside the duration range the model was trained on. / Trocea toda muestra mas larga que el ajuste Frames en tomas consecutivas de esa duracion, asi una grabacion larga se convierte en muchas muestras de entrenamiento. Vale para audio, video y video+audio. El audio se corta por los silencios siempre que haya uno dentro de la ventana, para que las tomas acaben en una pausa y no a media palabra; el video se corta por fotograma. La cola sobrante se conserva si llega al minimo, y los originales van a _originals. Una grabacion de 30 s a 124 fotogramas se convierte en seis o siete tomas: mas muestras, secuencias mas cortas, y dentro del rango de duracion con el que se entreno el modelo.">
+                            Split / Trocear
+                        </button>
+                        <button type="button" class="btn btn-danger btn-sm" onclick="clearAllCaptions()"
+                                title="Deletes the .txt of every sample in the dataset. The files are removed, not emptied: an empty .txt still counts as a caption, so the grid would show it green and the pre-cache would train on blank text without saying anything. There is no undo -- if a captioner wrote them, running it again rewrites them; if you wrote them by hand, they are gone. / Borra el .txt de todas las muestras del dataset. Los ficheros se eliminan, no se vacian: un .txt vacio sigue contando como caption, asi que la rejilla lo pintaria en verde y la pre-cache entrenaria con texto en blanco sin decir nada. No hay deshacer: si los escribio un generador, se vuelven a generar; si los escribiste a mano, se pierden.">
+                            Clear Captions / Borrar
+                        </button>
+                        <button type="button" class="btn btn-success btn-sm" onclick="loadDatasetInfo()">Refresh / Actualizar</button>
                     </div>
                 </div>
 
@@ -824,8 +900,8 @@
                             title="Which prompt you are editing. Each content type needs a different one: an image is described by what it LOOKS like, a clip by what CHANGES over time, and audio by how it SOUNDS. The captioner picks the right one per file, so the prompt for a type you do not have simply sits unused. / Que prompt estas editando. Cada tipo pide uno distinto: una imagen se describe por su ASPECTO, un clip por lo que CAMBIA con el tiempo, y el audio por como SUENA. El generador elige el que toca en cada fichero, asi que el prompt de un tipo que no tengas se queda sin usar.">
                         <option value="image">Image</option>
                         <option value="video">Video</option>
-                        <option value="audio">Audio (soon)</option>
-                        <option value="video_audio">Video + Audio (soon)</option>
+                        <option value="audio">Audio</option>
+                        <option value="video_audio">Video + Audio</option>
                     </select>
                     <textarea class="ds-search ds-caption-prompt" id="caption_prompt_text" rows="4"
                               placeholder="Prompt for the captioner / Prompt para el generador"></textarea>
@@ -853,7 +929,7 @@
     </div>
 
     <!-- Modal: Edit Caption & Inspection -->
-    <div class="modal" id="modal" onclick="closeModal(event)">
+    <div class="modal" id="modal" onmousedown="modalOverlayDown(event)" onclick="modalOverlayClick(event)">
         <div class="modal-content" onclick="event.stopPropagation()">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <h3 id="modal-filename" style="font-size:1rem;">Filename</h3>
@@ -864,6 +940,22 @@
                  Same slot as the image: only one of the two is visible. -->
             <video id="modal-vid" src="" controls autoplay loop playsinline
                    style="display:none; max-width:100%; max-height:60vh; border-radius:8px;"></video>
+            <!-- Tercer inquilino del mismo hueco. Un fichero de audio no tiene
+                 imagen que ensenar, y meterlo en el <img> pintaba el icono roto
+                 del navegador con el alt "Dataset Image" debajo: dos mentiras a
+                 la vez. Aqui hay lo unico que se puede mirar de una toma de voz,
+                 que es escucharla.
+                 Third tenant of the same slot. An audio file has no picture to
+                 show, and feeding it to the <img> drew the browser's broken-image
+                 icon with the alt "Dataset Image" under it -- two lies at once.
+                 This holds the only thing there is to inspect on a voice take:
+                 listening to it. -->
+            <div id="modal-audio" style="display:none; text-align:center; padding:18px 0;">
+                <img src="/assets/audio_solo.png" alt="Audio"
+                     style="width:96px; height:auto; opacity:0.9; display:block; margin:0 auto 14px;">
+                <audio id="modal-audio-el" src="" controls preload="metadata"
+                       style="width:100%;"></audio>
+            </div>
             <div class="form-group">
                 <label>Caption Text (.txt):</label>
                 <textarea id="modal-txt"></textarea>
@@ -1386,6 +1478,7 @@
                     if (t.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = t.vram_budget_gb;
                     if (t.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = t.ram_limit_gb;
                     if (t.use_sage_attention !== undefined) document.getElementById('train_use_sage_attention').checked = !!t.use_sage_attention;
+                    if (t.use_audio_loss !== undefined) document.getElementById('train_use_audio_loss').checked = !!t.use_audio_loss;
                     if (t.resident_blocks !== undefined) document.getElementById('train_resident_blocks').value = t.resident_blocks;
                     if (t.park_mode !== undefined) document.getElementById('train_park_mode').value = t.park_mode;
                     if (t.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = t.vram_swap_gb;
@@ -1486,6 +1579,7 @@
                     if (data.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = data.vram_budget_gb;
                     if (data.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = data.ram_limit_gb;
                     if (data.use_sage_attention !== undefined) document.getElementById('train_use_sage_attention').checked = !!data.use_sage_attention;
+                    if (data.use_audio_loss !== undefined) document.getElementById('train_use_audio_loss').checked = !!data.use_audio_loss;
                     if (data.resident_blocks !== undefined) document.getElementById('train_resident_blocks').value = data.resident_blocks;
                     if (data.park_mode !== undefined) document.getElementById('train_park_mode').value = data.park_mode;
                     if (data.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = data.vram_swap_gb;
@@ -1596,6 +1690,7 @@
                 vram_budget_gb: parseFloat(document.getElementById('train_vram_budget_gb').value),
                 ram_limit_gb: parseFloat(document.getElementById('train_ram_limit_gb').value) || 0,
                 use_sage_attention: document.getElementById('train_use_sage_attention').checked,
+                use_audio_loss: document.getElementById('train_use_audio_loss').checked,
                 resident_blocks: parseInt(document.getElementById('train_resident_blocks').value) || 0,
                 park_mode: document.getElementById('train_park_mode').value,
                 vram_swap_gb: parseFloat(document.getElementById('train_vram_swap_gb').value),
@@ -1799,8 +1894,8 @@
         const CAPTION_PROMPT_TITLE = {
             image: "What the model is asked about each image. The default aims for one plain paragraph covering subject, clothing, framing, setting and lighting. The trigger word is added separately, at the front. / Lo que se le pide al modelo sobre cada imagen. El de por defecto busca un parrafo llano con sujeto, ropa, encuadre, escenario e iluminacion. La palabra trigger se anade aparte, al principio.",
             video: "What the model is asked about each CLIP. Different from the image prompt: for a clip what matters is what CHANGES over time, not what it looks like. Keep the word limit inside the prompt, or the model spends its budget describing content and the caption gets cut mid-sentence. / Lo que se le pide al modelo sobre cada CLIP. Distinto del de imagen: en un clip importa lo que CAMBIA con el tiempo, no el aspecto. Deja el limite de palabras dentro del prompt, o el modelo gasta el presupuesto describiendo contenido y el caption sale cortado a media frase.",
-            audio: "NOT USED YET: audio captioning is not implemented. The prompt is saved so it is ready when it is. It asks for timbre, delivery and acoustic space rather than a transcript, because the model is trained on how it sounds, not on the words. / AUN SIN USO: el captioning de audio no esta implementado. El prompt se guarda para que este listo cuando lo este. Pide timbre, entrega y espacio acustico en vez de una transcripcion, porque el modelo se entrena con como suena, no con las palabras.",
-            video_audio: "NOT USED YET: joint video plus audio captioning is not implemented. The prompt is saved so it is ready when it is. It puts the picture first and the sound second, which is the order the packed sequence uses. / AUN SIN USO: el captioning conjunto de video y audio no esta implementado. El prompt se guarda para que este listo cuando lo este. Pone primero la imagen y despues el sonido, que es el orden de la secuencia empaquetada."
+            audio: "Audio training works; what does not exist is an automatic captioner for it, because Qwen3-VL cannot hear. Write these captions by hand, or fill them all at once with the common description box in the Dataset Manager. The prompt is kept for the day there is a model that listens. It asks for timbre, delivery and acoustic space rather than a transcript, because the model learns how it sounds, not the words. / El entrenamiento de audio funciona; lo que no existe es un generador automatico de captions para el, porque Qwen3-VL no oye. Escribelos a mano, o rellenalos todos de una vez con la caja de descripcion comun del Dataset Manager. El prompt se conserva para el dia que haya un modelo que escuche. Pide timbre, entrega y espacio acustico en vez de una transcripcion, porque el modelo aprende como suena, no las palabras.",
+            video_audio: "Video plus audio training works. The captioner describes only the picture, since Qwen3-VL cannot hear, so the usual way is to let it write the visual part and then append the audio sentence to every caption with the common description box. This prompt puts the picture first and the sound second, the order the packed sequence uses. / El entrenamiento de video mas audio funciona. El generador solo describe la imagen, porque Qwen3-VL no oye, asi que lo habitual es dejar que escriba la parte visual y despues anadir la frase de audio a todos los captions con la caja de descripcion comun. Este prompt pone primero la imagen y despues el sonido, que es el orden de la secuencia empaquetada."
         };
 
         let captionPrompts = Object.assign({}, CAPTION_PROMPT_DEFAULTS);
@@ -2002,7 +2097,7 @@
                 card.className = 'ds-card';
                 card.onclick = (ev) => {
                     if (ev.target.closest('.ds-del')) return;
-                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '', esVideo);
+                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '', esVideo, esAudio);
                 };
                 
                 const hasCaption = img.has_txt && img.caption && img.caption.trim().length > 0;
@@ -2014,14 +2109,34 @@
                 // hasta que el video se reproduce.
                 // The #t=0.1 fragment makes the browser paint the frame at 0.1 s as a
                 // poster; without it many browsers leave the slot black until playback.
+                const esAudio = img.kind === 'audio';
                 const esVideo = img.kind === 'video';
-                const medio = esVideo
+                const medio = esAudio
+                    ? `<div class="ds-audio">
+                           <img class="ds-audio-icon" src="/assets/audio_solo.png" alt="audio">
+                           <audio src="/api/dataset-image/${img.file}" controls preload="metadata"></audio>
+                       </div>`
+                    : esVideo
                     ? `<video src="/api/dataset-image/${img.file}#t=0.1" muted loop playsinline preload="metadata"></video>`
                     : `<img src="/api/dataset-image/${img.file}" alt="${img.file}">`;
+
+                // has_audio llega en null cuando el servidor no sondeo (dataset
+                // grande) o cuando el fichero no es un clip: en ese caso no se
+                // pinta nada, que es distinto de pintar "sin audio".
+                // has_audio arrives null when the server did not probe (large
+                // dataset) or the file is not a clip: nothing is drawn then, which
+                // is different from drawing "no audio".
+                const insignia = (esVideo && img.has_audio !== null && img.has_audio !== undefined)
+                    ? `<img class="ds-audio-badge" src="/assets/${img.has_audio ? 'audio_solo' : 'audio_mute'}.png"
+                            alt="${img.has_audio ? 'has audio' : 'no audio'}"
+                            title="${img.has_audio ? 'Has an audio track / Tiene pista de audio'
+                                                  : 'No audio track: trains picture only / Sin pista de audio: solo entrena imagen'}">`
+                    : '';
 
                 card.innerHTML = `
                     <div class="img-wrapper${esVideo ? ' is-video' : ''}">
                         ${medio}
+                        ${insignia}
                         <button type="button" class="ds-del" title="Remove from dataset / Eliminar del dataset">&#128465;</button>
                         <span class="${dotClass}" title="${dotTitle}"></span>
                         <div class="img-filename-tag">${img.file}</div>
@@ -2083,6 +2198,47 @@
                 if (data.status !== 'ok') { alert('Error: ' + (data.error || 'unknown')); return; }
                 loadDatasetInfo();
             } catch (e) { alert('Error: ' + e); }
+        }
+
+        async function splitSamples() {
+            const frames = parseInt(document.getElementById('precache_num_frames').value) || 124;
+            const seg = (frames / 24).toFixed(3);
+            const msg = 'Split every sample longer than ' + frames + ' frames (' + seg + ' s)?\n\n'
+                      + '\u00bfTrocear toda muestra mas larga que ' + frames + ' fotogramas (' + seg + ' s)?\n\n'
+                      + '\u2022 audio is cut at silences / el audio se corta por los silencios\n'
+                      + '\u2022 video is cut on the frame / el video se corta por fotograma\n\n'
+                      + 'Originals are moved to _originals.\n'
+                      + 'Los originales se mueven a _originals.';
+            if (!confirm(msg)) return;
+
+            const btn = document.getElementById('btn-split');
+            const prev = btn ? btn.innerText : '';
+            if (btn) { btn.disabled = true; btn.innerText = '...'; }
+            try {
+                const res = await fetch('/api/split-samples', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frames: frames })
+                });
+                const data = await res.json();
+                if (data.status === 'error') { alert('Error: ' + (data.error || 'unknown')); return; }
+                let out = data.split + ' split / troceadas, ' + data.skipped + ' untouched / sin tocar'
+                        + ' -> ' + data.produced + ' takes / tomas';
+                if (data.details && data.details.length) out += '\n\n' + data.details.join('\n');
+                if (data.warnings && data.warnings.length) out += '\n\nWarnings / Avisos:\n' + data.warnings.join('\n');
+                if (data.errors && data.errors.length) out += '\n\nErrors:\n' + data.errors.join('\n');
+                if (data.backup) out += '\n\nOriginals / Originales: ' + data.backup;
+                appendTerminal('');
+                appendTerminal('[SPLIT] ' + new Date().toLocaleTimeString(), false,
+                               data.errors && data.errors.length ? 'term-danger' : 'term-success');
+                out.split('\n').forEach(function (l) { appendTerminal(l); });
+                appendTerminal('');
+                loadDatasetInfo();
+            } catch (e) {
+                alert('Error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerText = prev; }
+            }
         }
 
         async function convertFps() {
@@ -2209,19 +2365,90 @@
             }
         }
 
-        async function addTriggerToAllCaptions() {
-            const trigger = document.getElementById('trigger_word').value;
-            if (!trigger) {
-                alert('Please enter a Trigger Word first / Por favor ingresa una palabra clave primero.');
+        async function clearAllCaptions() {
+            const n = parseInt(document.getElementById('ds-txt-count').innerText) || 0;
+            if (!n) {
+                alert('There are no captions to delete. / No hay captions que borrar.');
                 return;
             }
-            if (confirm(`Add trigger "${trigger}" to all dataset captions? / ¿Añadir palabra clave a todos los captions?`)) {
-                await fetch('/api/batch-caption', {
-                    method: 'POST',
-                    body: JSON.stringify({ trigger_word: trigger })
-                });
+            // Se pide el numero por escrito. Un boton rojo con un confirm normal
+            // se acepta por reflejo, y esto no tiene deshacer.
+            // The count is typed in. A red button with an ordinary confirm gets
+            // accepted by reflex, and this has no undo.
+            const resp = prompt('This DELETES the .txt of all ' + n + ' captions. There is no undo.\n'
+                              + 'Esto BORRA el .txt de los ' + n + ' captions. No hay deshacer.\n\n'
+                              + 'Type the number ' + n + ' to confirm / Escribe ' + n + ' para confirmar:');
+            if (String(resp || '').trim() !== String(n)) return;
+
+            try {
+                const res = await fetch('/api/clear-captions', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'error') { alert('Error: ' + (data.error || 'unknown')); return; }
+                appendTerminal('[CAPTIONS] ' + (data.removed || 0) + ' .txt deleted / borrados',
+                               false, 'term-warning');
+                if (data.errors && data.errors.length) {
+                    data.errors.forEach(function (x) { appendTerminal('   ' + x, false, 'term-danger'); });
+                }
                 loadDatasetInfo();
+            } catch (e) { alert('Error: ' + e); }
+        }
+
+        async function addTriggerToAllCaptions() {
+            const trigger = document.getElementById('trigger_word').value;
+            const comunEl = document.getElementById('ds-common-caption');
+            const comun = comunEl ? comunEl.value.trim() : '';
+
+            if (!trigger && !comun) {
+                alert('Enter a Trigger Word, a common description, or both.\n\n'
+                    + 'Escribe una palabra trigger, una descripci\u00f3n com\u00fan, o ambas.');
+                return;
             }
+
+            // Con descripcion comun se REEMPLAZA el caption entero, asi que el
+            // aviso tiene que decirlo y enseñar el texto resultante: no es lo
+            // mismo anteponer el trigger que borrar lo que hubiera escrito.
+            // With a common description the whole caption is REPLACED, so the
+            // prompt has to say so and show the resulting text: prepending the
+            // trigger is not the same as wiping what was written.
+            const modoEl = document.getElementById('ds-common-mode');
+            const modo = modoEl ? modoEl.value : 'append';
+
+            let msg;
+            if (!comun) {
+                msg = 'Add trigger "' + trigger + '" to all dataset captions? / '
+                    + '\u00bfA\u00f1adir palabra clave a todos los captions?';
+            } else if (modo === 'replace') {
+                msg = 'REPLACE every caption with:\n\n'
+                    + '    ' + (trigger ? trigger + ', ' : '') + comun + '\n\n'
+                    + 'REEMPLAZAR todos los captions por ese texto.\n'
+                    + 'Lo que hubiera escrito se pierde.';
+            } else if (modo === 'remove') {
+                msg = 'REMOVE this text from every caption, leaving the rest:\n\n'
+                    + '    ' + comun + '\n\n'
+                    + 'QUITAR ese texto de todos los captions, conservando el resto.\n'
+                    + 'Sirve para deshacer un trigger a\u00f1adido por error.';
+            } else {
+                msg = 'APPEND this sentence at the end of every caption:\n\n'
+                    + '    ' + comun + '\n\n'
+                    + 'A\u00d1ADIR esa frase al final de cada caption.\n'
+                    + 'Lo que ya estaba escrito se conserva.';
+            }
+            if (!confirm(msg)) return;
+
+            const res = await fetch('/api/batch-caption', {
+                method: 'POST',
+                body: JSON.stringify({ trigger_word: trigger, common: comun, mode: modo })
+            });
+            try {
+                const data = await res.json();
+                appendTerminal('[CAPTIONS] ' + (data.updated_count || 0)
+                               + (!comun ? ' caption(s) updated / actualizados'
+                                         : (modo === 'replace' ? ' caption(s) replaced / reemplazados'
+                                         : (modo === 'remove'  ? ' caption(s) cleaned / limpiados'
+                                                               : ' caption(s) extended / ampliados'))),
+                               false, 'term-success');
+            } catch (e) {}
+            loadDatasetInfo();
         }
 
         async function loadPreviews() {
@@ -2342,19 +2569,35 @@
             });
         })();
 
-        function openModal(src, filename, text, esVideo) {
+        function openModal(src, filename, text, esVideo, esAudio) {
             currentEditingFilename = filename;
+            captionAlAbrir = text || '';
             document.getElementById('modal-filename').innerText = filename;
             const im = document.getElementById('modal-img');
             const vi = document.getElementById('modal-vid');
+            const au = document.getElementById('modal-audio');
+            const ae = document.getElementById('modal-audio-el');
 
-            if (esVideo) {
+            if (esAudio) {
+                im.removeAttribute('src');
+                im.style.display = 'none';
+                vi.pause();
+                vi.removeAttribute('src');
+                vi.load();
+                vi.style.display = 'none';
+                ae.src = src;
+                au.style.display = 'block';
+            } else if (esVideo) {
+                if (ae) { ae.pause(); ae.removeAttribute('src'); ae.load(); }
+                au.style.display = 'none';
                 im.removeAttribute('src');
                 im.style.display = 'none';
                 vi.src = src;
                 vi.style.display = 'block';
                 vi.play().catch(() => {});
             } else {
+                if (ae) { ae.pause(); ae.removeAttribute('src'); ae.load(); }
+                au.style.display = 'none';
                 // Vaciar el src del video ANTES de ocultarlo: un <video> escondido
                 // con src sigue descargando y sigue sonando.
                 // Clear the video src BEFORE hiding it: a hidden <video> with a src
@@ -2370,13 +2613,65 @@
             document.getElementById('modal').classList.add('active');
         }
 
+        // ------------------------------------------------------------------
+        // POR QUE EL MODAL NO PUEDE CERRARSE CON UN `click` A SECAS.
+        //
+        // El evento `click` se dispara al SOLTAR el raton, y su target es el
+        // ancestro comun del elemento donde se pulso y de aquel donde se solto.
+        // Al seleccionar texto en el caption y soltar fuera del recuadro, ese
+        // ancestro comun es el fondo: el navegador manda un `click` sobre el
+        // fondo aunque la pulsacion empezara dentro. El modal se cerraba y la
+        // edicion se perdia, justo cuando mas trabajo llevaba encima.
+        //
+        // Se arregla mirando DONDE EMPEZO la pulsacion, no donde acabo.
+        //
+        // The `click` event fires on mouse RELEASE and its target is the common
+        // ancestor of press and release. Selecting text in the caption and
+        // releasing outside the box makes that ancestor the backdrop, so the
+        // browser sends a `click` on the backdrop even though the press started
+        // inside: the modal closed and the edit was lost. Fixed by looking at
+        // where the press STARTED, not where it ended.
+        // ------------------------------------------------------------------
+        let modalPulsadoEnFondo = false;
+
+        function modalOverlayDown(e) {
+            modalPulsadoEnFondo = (e.target === e.currentTarget);
+        }
+
+        function modalOverlayClick(e) {
+            if (e.target !== e.currentTarget) return;   // el clic fue dentro
+            if (!modalPulsadoEnFondo) return;           // empezo dentro: es una seleccion
+            closeModal(e);
+        }
+
+        // Texto del caption tal como se abrio, para saber si se ha tocado.
+        // The caption text as opened, to tell whether it was touched.
+        let captionAlAbrir = '';
+
         function closeModal(e) {
+            // Cerrar con un caption editado y sin guardar tira el trabajo sin
+            // avisar. Con un solo fichero se rehace en diez segundos; revisando
+            // sesenta y nueve, no.
+            // Closing with an edited, unsaved caption throws the work away
+            // silently. On one file that is ten seconds of retyping; on a review
+            // pass over sixty-nine, it is not.
+            const campo = document.getElementById('modal-txt');
+            if (campo && campo.value !== captionAlAbrir) {
+                if (!confirm('The caption has unsaved changes. Close and lose them?\n\n'
+                           + 'El caption tiene cambios sin guardar. \u00bfCerrar y perderlos?')) {
+                    return;
+                }
+            }
             document.getElementById('modal').classList.remove('active');
             // Cerrar el modal tiene que PARAR el clip: si no, se sigue oyendo
             // detras de la interfaz.
             // Closing must STOP the clip, or it keeps playing behind the UI.
             const vi = document.getElementById('modal-vid');
             if (vi) { vi.pause(); vi.removeAttribute('src'); vi.load(); }
+            // Lo mismo para el audio: un <audio> oculto con src sigue sonando.
+            // Same for audio: a hidden <audio> with a src keeps playing.
+            const ae = document.getElementById('modal-audio-el');
+            if (ae) { ae.pause(); ae.removeAttribute('src'); ae.load(); }
         }
 
         async function saveCurrentCaption() {
