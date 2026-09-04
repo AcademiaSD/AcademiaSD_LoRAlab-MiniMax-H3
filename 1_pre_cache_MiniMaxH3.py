@@ -2584,11 +2584,34 @@ def audio_frames_for(duracion, objetivo=0):
     """
     if not duracion or duracion <= 0:
         return None
-    if objetivo and objetivo >= H3_BASE_FRAMES:
-        return h3_valid_frames(int(round(objetivo)), 0)
+
+    # Cada toma usa SU duracion; num_frames actua de TOPE, no de valor fijo.
+    #
+    # Forzarlo a todas rellena de silencio las cortas. Medido sobre 69 segmentos
+    # de voz de 1,4 a 5,2 s: con 124 fotogramas para todas, el 28% de lo
+    # entrenado era silencio; con la duracion propia, el 10%. Un 28% de silencio
+    # le enseña al modelo que despues de hablar viene una pausa larga, que es
+    # justo lo que no se quiere de un LoRA de voz.
+    #
+    # En video el tope si tiene sentido como recorte -- ahi la muestra es un
+    # trozo de una accion continua -- pero una toma de audio ya viene delimitada
+    # por sus silencios: alargarla no anade informacion, solo coste.
+    #
+    # Each take uses ITS duration; num_frames is a CAP, not a fixed value.
+    # Forcing it on everything pads the short ones with silence: measured over 69
+    # voice segments of 1.4 to 5.2 s, a fixed 124 frames made 28% of the training
+    # material silence against 10% with each take's own length. Teaching a voice
+    # LoRA that speech is followed by a long pause is the opposite of the goal.
+    # For video the cap does work as a trim -- there the sample is a slice of a
+    # continuous action -- but an audio take already ends where its silence is.
     ideal = duracion * 24.0
     k = int(math.ceil((ideal - H3_BASE_FRAMES) / float(H3_CLIP_LENGTH) - 1e-9))
-    return max(H3_BASE_FRAMES, H3_CLIP_LENGTH * max(0, k) + H3_BASE_FRAMES)
+    propio = max(H3_BASE_FRAMES, H3_CLIP_LENGTH * max(0, k) + H3_BASE_FRAMES)
+
+    if objetivo and objetivo >= H3_BASE_FRAMES:
+        tope = h3_valid_frames(int(round(objetivo)), 0)
+        return min(propio, tope)
+    return propio
 
 
 def probe_fps(path):
@@ -3276,12 +3299,28 @@ def preprocess_minimaxh3():
     # What the cache actually holds, counted rather than assumed: a dataset can
     # be mixed, and the trainer needs to know whether it will find 1-frame
     # latents, 17n+5 ones, or both.
+    # El audio se contaba como imagen: la resta de arriba solo distinguia video
+    # de "lo demas", asi que 69 tomas de voz salian en cache_info como 69
+    # imagenes de un fotograma. Los latentes eran correctos -- el `kind` de cada
+    # muestra si decia "audio" -- pero el resumen de la cache mentia, y de ahi
+    # salen los avisos que lee el entrenador.
+    # Audio counted as image: the subtraction above only told video from
+    # "everything else", so 69 voice takes were recorded as 69 one-frame images.
+    # The latents were right -- each sample's `kind` did say "audio" -- but the
+    # cache summary lied, and the trainer's warnings are read from it.
     _n_clips = sum(1 for f in images if is_video(f))
-    _n_imgs = len(images) - _n_clips
-    if _n_clips and _n_imgs:
+    _n_audio = sum(1 for f in images if is_audio(f))
+    _n_imgs = len(images) - _n_clips - _n_audio
+
+    _presentes = [n for n in (_n_clips, _n_audio, _n_imgs) if n]
+    if len(_presentes) > 1:
         _kind, _frames = "mixed", None
     elif _n_clips:
         _kind, _frames = "video", NUM_FRAMES
+    elif _n_audio:
+        # Sin un solo valor: cada toma usa su duracion, con NUM_FRAMES de tope.
+        # No single value: each take uses its own duration, capped by NUM_FRAMES.
+        _kind, _frames = "audio", None
     else:
         _kind, _frames = "image", 1
 
@@ -3302,6 +3341,7 @@ def preprocess_minimaxh3():
         "num_frames": _frames,
         "content": _kind,
         "num_images": _n_imgs,
+        "num_audio": _n_audio,
         "num_clips": _n_clips,
         "max_sequence_length": MAX_SEQ_LEN,
         "trigger_word": TRIGGER_WORD,
