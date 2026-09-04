@@ -3,7 +3,7 @@
 ![AcademiaSD LoRAlab MiniMax-H3](assets/portada.jpg)
 
 <p align="center">
-  <b>Train MiniMax-H3 character & style LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, from 8 GB of VRAM.</b>
+  <b>Train MiniMax-H3 character, style and video-effect LoRAs on a consumer GPU — a 33-Billion parameter joint video+audio DiT, from 8 GB of VRAM.</b>
 </p>
 
 <p align="center">
@@ -32,7 +32,9 @@
 
 > **Why rank 16 and not rank 8.** Rank 8 produces an equally good likeness for less VRAM, which makes it look like the better deal — but it is not. With only 8 directions per matrix the adapter runs out of room for the identity and starts occupying directions the base model was using for composition. The symptom is subtle and easy to misread: the face is perfect, and the model stops obeying the prompt. Ask for a beach and you get a bedroom. Rank 16 has room for the identity without evicting anything, so likeness and prompt adherence improve together.
 
-This trainer is for **image datasets** (characters, faces, styles). It does not train video clips or audio.
+This trainer takes **images, video clips, or both in the same folder**. Images teach appearance; clips teach how something *changes over time* — a transition, a transformation, a camera move. **Audio is not trained yet**, although the pre-cache already reads the audio VAE geometry so the format does not have to change when it is.
+
+> **Verified result (video):** 9 clips of **5.2 s** at **192×192**, **124 frames**, 600 steps, LR 2e-4, **rank/alpha 8** → the effect reproduces cleanly at strength 1.0 in `FL2VA`. Total time **1 h 10 min** on a 16 GB card. Clips are far more forgiving of low resolution than faces are, because what the LoRA has to learn is *motion*, not detail.
 
 ---
 
@@ -88,6 +90,9 @@ This trainer is for **image datasets** (characters, faces, styles). It does not 
 ### Dataset Manager
 - **🖼️ Visual grid & caption editor** — caption status badges (🟢 present / 🔴 missing), filename overlays, a lightbox to edit `.txt` captions directly on disk, and a batch tool to inject trigger words.
 - **🤖 Auto-captioning** — one button writes a caption for every image with **Qwen3-VL-4B-Instruct**, trigger word first. The button reads *Create Captions* or *Redo Captions* depending on what already exists, and asks before overwriting. The prompt is editable, so you can steer the style without touching code.
+- **🎬 Video clips** — clips render as playable cards with film-sprocket borders and play on hover; click to open one full size with transport controls.
+- **✂️ Prepare clips** — one button leaves every clip at exactly **24 fps** with a valid **17n+5** frame count, **without cutting anything off the end**: it resamples and stretches time by the couple of percent needed to reach a valid count. Originals are kept in `_originals/`.
+- **🏷️ One caption prompt per content type** — a selector switches between the **image**, **video** and (reserved) **audio** prompts. An image is described by what it *looks like*, a clip by what *changes*; the same prompt cannot do both.
 - **🗑️ Per-image delete** — a trash icon on each thumbnail removes the image **and its `.txt`** from disk, with a confirmation naming the file.
 - **🧹 Delete project data** — two buttons wipe the current project's **pre-cache** or **training output**, each behind its own confirmation. They refuse to run while a process is active, since deleting underneath a running trainer leaves it writing into a checkpoint that no longer exists.
 - **📊 Dataset summary** — image count, epochs, and the video-token grid, reported before training starts so you can plan the next experiment.
@@ -148,6 +153,63 @@ The sizing model was fitted against measured runs on an RTX 5080 16 GB and repro
 | 448² | 5.90 | 8 GB |
 
 **8 GB is the minimum.** Even at 448×448, stripping every block out of VRAM still leaves 5.90 GB that has to be resident, so a 6 GB card has nowhere to put the desktop. It was reached once, in emulation, at 320×320 — a resolution too small to produce a LoRA worth using. Treat 448×448 as the bottom of the useful range and 8 GB as the card that runs it. 4 GB does not fit at any resolution.
+
+### VRAM with video clips
+
+A clip's sequence is the same tokens per frame as an image — one token per 32×32
+real pixels — multiplied by its **latent** frames. 124 pixel frames are 37 latents, so a
+192×192 clip is 37×36 = **1,332 tokens** where a 192×192 still would be 36. That is
+what sets the peak, and the plan reads it from the cache rather than assuming.
+
+Measured on a 16 GiB card, peaks include the Windows desktop:
+
+| Blocks | 192×192 / 124f | s/it | 256×256 / 107f | s/it |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 7.3 GB | 9.30 | 9.3 GB | 10.88 |
+| 10 | 10.5 | 8.19 | — | — |
+| 20 | 13.8 | 6.73 | 15.5 | 8.78 |
+| 25 | 15.5 | 6.59 | does not fit | — |
+
+What each card gets at **192×192 / 124 frames**, chosen automatically:
+
+| Card | Resident blocks | Peak | s/it |
+| :--- | ---: | ---: | ---: |
+| 8 GB | 1 | 7.3 | ~9.2 |
+| 12 GB | 12 | 11.2 | ~7.9 |
+| **16 GB** | **24** | **15.5** | **~6.5** |
+| 24 GB | 46 | 23.3 | ~3.9 |
+
+And how far the geometry can be pushed on a 16 GB card. Read down a column for the cost of
+resolution, along a row for the cost of length:
+
+| Area | 22f | 56f | 107f | 124f | 158f |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 192² | 27 | 27 | 26 | 24 | 22 |
+| 256² | 27 | 26 | 19 | 17 | 13 |
+| 320² | 27 | 22 | 11 | 8 | 1 |
+| 384² | 27 | 16 | 1 | — | — |
+| 448² | 24 | 10 | — | — | — |
+
+**Video reaches lower than images do.** At 192×192 the floor is 6.3 GB with zero resident
+blocks, so an 8 GB card trains clips — something the image path cannot do below 5.90 GB
+either, but here the whole 5.2 s clip fits. What does not fit in 8 GB is 256×256, whose
+floor is 8.5 GB before a single block goes resident.
+
+The block cost is pure PCIe bandwidth and does not depend on the geometry: **0.1175 s/it per
+swapped block**, which is one 0.333 GB NF4 block at 2.83 GB/s, measured identically at
+384×384/56f and at 256×256/107f. Compute is **linear in tokens**, not quadratic —
+at these lengths the MLPs and projections dominate, not attention:
+
+```text
+s/it = (50 - resident_blocks) x 0.1175  +  tokens x 0.002545
+peak = 3.264 + 0.002340 x tokens + 0.3542 x resident_blocks     (GiB)
+```
+
+Both fitted against eight measured peaks across two geometries and 2-25 resident blocks,
+worst error 0.24 GiB. Past ~20 resident blocks on a 16 GB card the peak stops being
+predictable: it is the only setting that did not reproduce itself between runs (8.78 and
+8.91 s/it for the same configuration), because the allocator starts spilling. **Leave one
+block of headroom rather than taking the last one.**
 
 ### System RAM
 
@@ -214,6 +276,46 @@ Two details worth knowing:
 
 The prompt is editable next to the button, so you can ask for a different style — more about clothing, less about the background — without touching code.
 
+#### Training on video clips
+
+Drop `.mp4`, `.mov`, `.mkv` or `.webm` next to their `.txt` captions, exactly like images.
+A folder may hold both.
+
+H3 is strict about clip geometry, and the two rules are not negotiable:
+
+* **24 fps.** The model reasons at 24 fps. A clip at 30 or 32 fps trains the motion at the
+  wrong speed — 161 frames shot at 32 fps play back over 6.71 s instead of 5.03, a third
+  slower.
+* **A frame count of 17n+5** — 5, 22, 39, 56, 73, 90, 107, 124, 141, 158. The video VAE
+  compresses time by a factor that maps these onto 5n+2 latents. Any other count and the
+  pre-cache falls back to the next valid one **below**, silently dropping the tail.
+
+Press **Prepare clips** and both are handled. It reports what it did per clip:
+
+```text
+rbtfcrvlv1d01.mp4 (32 -> 24 fps, 161 -> 124 frames, 5.03s -> 5.17s)
+```
+
+Note the third field. It **does not trim**: it resamples the whole clip to 24 fps and
+stretches time by the 2.7 % needed to land on 124 frames. Nothing is cut. That matters more
+than it sounds — the payoff of an effect lives in its last frames, and a LoRA trained on
+a truncated arc learns a transformation that stops halfway and then reverses, because the
+model reaches what it believes is the end and has nowhere to continue.
+
+Then press **Create Captions**, in that order. The captioner samples its frames from the
+window the pre-cache will actually train, so if you set **Frames** below the clip's own
+length it describes only that window and says so:
+
+```text
+[!] clip01.mp4: captioning the first 107 of 161 frames (66% of the clip),
+    which is what pre-cache will train. The rest is NOT described.
+```
+
+A caption that promises an ending the pixels do not contain is worse than a vague one: it
+teaches the model that the final state's words belong to a half-finished image.
+
+**Set Frames to the clip length**, not lower, unless you deliberately want a shorter arc.
+
 ### 3. Pre-Cache
 
 1. Enter a **Project Name** and a **Trigger Word**.
@@ -278,6 +380,10 @@ Most settings live in the `DEFAULTS` dictionary at the top of each script, docum
 | `park_mode` | `auto` | Where parked blocks live: `ram`, `disk`, or `auto` (RAM until `ram_limit_gb` would be crossed). |
 | `ram_limit_gb` | `0` | `auto` only. Ceiling for **total system** RAM, the figure in Task Manager. `0` = no limit. |
 | `park_disk_dir` | `""` | Where the spill file goes. Defaults to the output folder; point it at a drive with room, the file needs up to ~16 GB. |
+| `num_frames` | `124` | Pixel frames per clip, **17n+5** only. Ignored for images. Set it to the clip's own length: anything lower trains a prefix and the caption will describe an ending the pixels do not have. |
+| `resident_blocks` | `0` | Blocks kept in VRAM out of 50. `0` lets the plan decide from the cached sequence length. A manual value overrides it, even upwards — whoever types one is measuring. |
+| `use_sage_attention` | `false` | **Does nothing while training** and the log says why: SageAttention ships inference kernels with no backward, so its output returns `requires_grad=False` and the q/k/v LoRAs would silently receive zero gradient. Kept for previews. |
+| `vram_training_overhead_gb` | `2.5` | Floor for the training-step reserve. Above ~900 tokens the calibrated line takes over; below it this fixed value, which was measured on images, still wins. |
 | `max_seq_len` | `100` | Text tokens kept per caption (~75 words). Every token rides in the packed sequence and costs VRAM on **every** step. Anything longer is truncated here. |
 | `captioner_repo` | `Qwen/Qwen3-VL-4B-Instruct` | Auto-captioning model, downloaded on first use into `captioner_dir`. |
 | `captioner_4bit` | `True` | 4-bit keeps it at ~3 GB. `False` loads bf16 (~8 GB) for slightly richer descriptions. |
@@ -325,10 +431,11 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 
 ## ⚠️ Beta notes & known limitations
 
-* **Image datasets only.** Video clips and audio training are not implemented. The trainer targets characters and styles.
+* **Audio is not trained.** Images and video clips are. The pre-cache already reads the audio VAE's geometry (32 kHz, 32 latent channels, the same 17n+5 grid) so that adding it later does not change the cache format, but nothing writes audio latents yet.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
-* **8 GB is the floor.** Even at 448×448, the smallest resolution worth training at, 5.90 GB has to stay resident no matter how many blocks you swap out. A 6 GB card has nowhere left for the desktop. 4 GB does not fit at any resolution.
+* **8 GB is the floor.** For images, even at 448×448 there are 5.90 GB that stay resident no matter how many blocks you swap out. For clips at 192×192 the floor is 6.3 GB. A 6 GB card has nowhere left for the desktop either way, and 4 GB does not fit at any resolution.
+* **The plan sizes blocks, not geometry.** It computes how many blocks fit the clips you have already cached. It will tell you 448×448 at 124 frames does not fit — correctly — but it will not lower the resolution or shorten the clip for you.
 * **Tested with Turbo LoRAs.** The exported LoRAs load and behave correctly in ComfyUI alongside several Turbo LoRAs, with no key clashes or strength interference.
 * **Windows-focused.** The launchers are `.bat` files. The three Python scripts carry no platform-specific code and `server.py` already has POSIX branches, so a Linux port is mostly writing `.sh` files — but note that Linux has **no VRAM-to-RAM overflow**: a budget that merely runs slow on Windows will hard-OOM there, so the profiles would need revalidating.
 
