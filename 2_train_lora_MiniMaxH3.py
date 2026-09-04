@@ -280,7 +280,7 @@ DEFAULTS = {
     "frame_rate": 24.0,
     "project_name": "",
     "trigger_word": "",
-    "max_text_tokens": 192,
+    "max_text_tokens": 100,
 
     # Guarda un SEGUNDO .safetensors con las keys tal cual las produce PEFT (nombres
     # diffusers, sin renombrar, sin fusionar QKV y sin el swap SwiGLU de mlp.fc1).
@@ -378,6 +378,33 @@ DEFAULTS = {
     # Reuse the CPU copy of swapped blocks instead of remaking it with a D2H copy
     # every time. Big win (measured 16.58 -> 9.61 s/it) and safe because the NF4
     # weights are frozen. Set to False only to rule it out as a cause of trouble.
+    # SageAttention: atencion cuantizada a int8/fp8. Menos memoria y mas rapida
+    # que la nativa, a cambio de cambiar la NUMERICA de la atencion. En
+    # inferencia es gratis; entrenando no lo es, asi que viene apagada.
+    # SageAttention: int8/fp8 quantized attention. Less memory and faster than
+    # native, in exchange for changing the attention NUMERICS. Free in inference;
+    # not free when training, so it ships off.
+    # Bloques residentes forzados. 0 = automatico (lo calcula el plan de VRAM).
+    #
+    # El plan solo sabe contar PESOS: base + N*bloque + overhead. Ese overhead de
+    # 2,5 GB se calibro con secuencias de imagen de 300-700 tokens, donde las
+    # activaciones son pequenas. Con un clip de 3.400 tokens las activaciones
+    # dominan y el plan se pasa de largo: pide 30 residentes y satura la tarjeta.
+    #
+    # Modelar las activaciones de video en condiciones exigiria medir mucho, y la
+    # atencion escala O(n^2), asi que una formula lineal mas seria mentir con mas
+    # decimales. Mejor un numero a mano.
+    #
+    # Forced resident block count. 0 = automatic. The plan can only count WEIGHTS
+    # (base + N*block + overhead), and that 2.5 GB overhead was calibrated on
+    # 300-700 token image sequences where activations are small. On a 3,400 token
+    # clip the activations dominate and the plan overshoots. Modelling video
+    # activations properly would take a lot of measuring, and attention is O(n^2),
+    # so another linear formula would just be a more precise lie.
+    "resident_blocks": 0,
+
+    "use_sage_attention": False,
+
     "nf4_cpu_home": True,
     # Donde viven los bloques que no caben en VRAM:
     #   "ram"   siempre en RAM (mas rapido si hay RAM de sobra)
@@ -666,33 +693,6 @@ else:
           "defecto.".format(CONFIG_PATH, CONFIG_PATH), flush=True)
 
 
-def new_layer_empty(cls, in_features, out_features, bias=False, **kwargs):
-    """Crea una capa lineal SIN inicializar sus pesos.
-
-    nn.Linear.__init__ reserva la matriz completa y la rellena con kaiming
-    uniform. En todos los sitios donde se usa aqui, ese relleno se descarta acto
-    seguido al asignarle el peso real del checkpoint, pero cuesta lo que cuesta:
-    medido sobre los tamanos de este modelo son ~0,58 s por capa grande, y con
-    370 capas eran los ~133 segundos que tardaba el arranque. Practicamente TODO
-    el tiempo de carga era generar numeros aleatorios para tirarlos.
-
-    Construida en el dispositivo `meta` no se reserva memoria ni se rellena nada;
-    `to_empty` reserva despues el hueco en CPU sin escribir en el. La capa queda
-    identica: 941x mas rapido, mismos pesos.
-
-    Creates a linear layer WITHOUT initializing its weights. nn.Linear.__init__
-    allocates the full matrix and fills it with kaiming uniform; everywhere it is
-    used here that fill is discarded immediately when the checkpoint weight is
-    assigned, yet it costs ~0.58 s per large layer -- the ~133 seconds the load
-    used to take. Almost the entire load was generating random numbers to throw
-    away. Built on `meta` nothing is allocated or filled; `to_empty` then reserves
-    CPU storage without writing to it. Identical layer, 941x faster.
-    """
-    with torch.device("meta"):
-        layer = cls(in_features, out_features, bias=bias, **kwargs)
-    return layer.to_empty(device="cpu")
-
-
 def cfg_get(key, default):
     if not isinstance(cfg, dict):
         return default
@@ -775,6 +775,7 @@ def log_print(*args, **kwargs):
         # cannot be tuned. It was hidden with debug_training=False.
         "[VRAM-PLAN]",
         "[SPILL]",
+        "[ATTN]",
         # El resumen del dataset son 3-4 lineas una sola vez por corrida y es
         # justo lo que hay que tener delante al decidir el siguiente experimento.
         # Ya no lleva [WARN] porque no es un aviso: es informacion.
@@ -1052,6 +1053,8 @@ LORA_KEY_PREFIX = str(cfg_get("lora_key_prefix", DEFAULTS["lora_key_prefix"]))
 
 LOW_VRAM_12GB = _cfg_bool("low_vram_12gb", DEFAULTS["low_vram_12gb"])
 ACTIVATION_OFFLOAD = _cfg_bool("activation_offload", DEFAULTS["activation_offload"])
+RESIDENT_BLOCKS = int(cfg_get("resident_blocks", DEFAULTS["resident_blocks"]) or 0)
+USE_SAGE_ATTENTION = _cfg_bool("use_sage_attention", DEFAULTS["use_sage_attention"])
 NF4_CPU_HOME = _cfg_bool("nf4_cpu_home", DEFAULTS["nf4_cpu_home"])
 PARK_MODE = str(cfg_get("park_mode", DEFAULTS["park_mode"])).strip().lower()
 if PARK_MODE not in ("auto", "ram", "disk"):
@@ -1146,6 +1149,9 @@ log_print("  Use Audio Loss      : {}".format("ON" if USE_AUDIO_LOSS else "OFF")
 log_print("  Seed                : {} ({})".format(SEED, "RANDOM" if SEED <= 0 else "FIXED"))
 log_print("  Low VRAM 12GB mode  : {}".format("ON" if LOW_VRAM_12GB else "OFF"))
 log_print("  Activation Offload  : {}".format("ON" if ACTIVATION_OFFLOAD else "OFF"))
+log_print("  Resident Blocks     : {}".format(
+    RESIDENT_BLOCKS if RESIDENT_BLOCKS > 0 else "AUTO (plan de VRAM / VRAM plan)"))
+log_print("  Sage Attention      : {}".format("ON" if USE_SAGE_ATTENTION else "OFF"))
 log_print("  NF4 CPU Home        : {}".format("ON" if NF4_CPU_HOME else "OFF"))
 log_print("  Block Park Mode     : {}".format(PARK_MODE.upper()))
 log_print("  RAM Limit GB        : {}".format(
@@ -2033,8 +2039,7 @@ def _repair_from_nf4_index(transformer):
                 fixed.append((mname, str(w.dtype).replace("torch.", "")))
                 continue
 
-            new = new_layer_empty(torch.nn.Linear, w.shape[1], w.shape[0],
-                                  bias=b is not None)
+            new = torch.nn.Linear(w.shape[1], w.shape[0], bias=b is not None)
             new.weight = torch.nn.Parameter(w, requires_grad=False)
             if b is not None:
                 new.bias = torch.nn.Parameter(b, requires_grad=False)
@@ -2209,8 +2214,7 @@ def repair_precision_critical_modules(transformer, orig_dir):
                     if bkey in _open[_sp2].keys():
                         _b = _open[_sp2].get_tensor(bkey).to(_dt)
 
-                new = new_layer_empty(torch.nn.Linear, _w.shape[1], _w.shape[0],
-                                      bias=_b is not None)
+                new = torch.nn.Linear(_w.shape[1], _w.shape[0], bias=_b is not None)
                 new.weight = torch.nn.Parameter(_w, requires_grad=False)
                 if _b is not None:
                     new.bias = torch.nn.Parameter(_b, requires_grad=False)
@@ -2373,23 +2377,19 @@ def load_transformer_from_nf4(nf4_cache_dir):
         compress = any(str(k).startswith("nested_") for k in qs_dict.keys())
 
         try:
-            new_layer = new_layer_empty(
-                Linear4bit,
+            new_layer = _new_linear4bit_empty(
                 int(info["in_features"]),
                 int(info["out_features"]),
                 bias=(bias_data is not None),
                 quant_type=info.get("quant_type", "nf4"),
-                compute_dtype=torch.bfloat16,
                 compress_statistics=compress,
             )
         except TypeError:
-            new_layer = new_layer_empty(
-                Linear4bit,
+            new_layer = _new_linear4bit_empty(
                 int(info["in_features"]),
                 int(info["out_features"]),
                 bias=(bias_data is not None),
                 quant_type=info.get("quant_type", "nf4"),
-                compute_dtype=torch.bfloat16,
             )
 
         # CARGAR DIRECTAMENTE EN CPU.
@@ -3148,10 +3148,41 @@ def verify_cache_compatibility(cache_dir):
             .format(os.path.abspath(cache_dir), version, MIN_CACHE_VERSION)
         )
 
+    # Que hay en la cache. Antes esto era un WARN fijo en cuanto num_frames no
+    # fuera 1, heredado de cuando solo existian imagenes: con una cache de clips
+    # saltaba siempre diciendo algo falso, y un aviso que salta siempre deja de
+    # leerse. Ahora informa, y solo avisa cuando la geometria es imposible.
+    #
+    # What the cache holds. This used to be a fixed WARN whenever num_frames was
+    # not 1, left over from when only images existed: with a clip cache it fired
+    # every time saying something untrue, and a warning that always fires stops
+    # being read. It now reports, and only warns when the geometry is impossible.
+    contenido = str(info.get("content", "image"))
     nf = info.get("num_frames", None)
-    if nf is not None and int(nf) != 1:
-        log_print("[CACHE][WARN] cache_info.num_frames={} pero el entrenamiento de imagen "
-                  "codifica T=1. Revisa que la geometría no se desincronice.".format(nf),
+
+    if contenido == "video" and nf:
+        # H3 exige 17n+5 fotogramas de pixel -> 5n+2 latentes. Cualquier otro
+        # numero no lo pudo producir el VAE, asi que la cache viene de otro sitio
+        # o se genero con una version anterior del script 1.
+        # H3 requires 17n+5 pixel frames -> 5n+2 latents. Any other count could
+        # not have come out of the VAE, so the cache is from elsewhere or from an
+        # older version of script 1.
+        valido = int(nf) >= 5 and (int(nf) - 5) % 17 == 0
+        log_print("[CACHE] Clips: {} | {} pixel frames -> {} latent frames{} / "
+                  "Clips: {} | {} fotogramas de pixel -> {} latentes{}".format(
+                      info.get("num_clips", "?"), nf, 5 * ((int(nf) - 5) // 17) + 2,
+                      "" if valido else "  [!]",
+                      info.get("num_clips", "?"), nf, 5 * ((int(nf) - 5) // 17) + 2,
+                      "" if valido else "  [!]"), flush=True)
+        if not valido:
+            log_print("[CACHE][WARN] num_frames={} is not 17n+5, which is the only geometry "
+                      "the H3 VAE can produce. Regenerate the pre-cache. / num_frames={} no "
+                      "es 17n+5, la unica geometria que puede producir el VAE de H3. "
+                      "Regenera la pre-cache.".format(nf, nf), flush=True)
+    elif contenido == "mixed":
+        log_print("[CACHE] Mixed dataset: {} images + {} clips. / Dataset mixto: {} imagenes "
+                  "+ {} clips.".format(info.get("num_images", "?"), info.get("num_clips", "?"),
+                                       info.get("num_images", "?"), info.get("num_clips", "?")),
                   flush=True)
 
     ac = info.get("audio_latent_channels", None)
@@ -3614,15 +3645,111 @@ def silence_diffusers_attention_backend_notice():
 def enable_memory_efficient_attention(transformer):
     silence_diffusers_attention_backend_notice()
 
+    # Nombres REALES de diffusers. Los que habia aqui antes ("sdpa",
+    # "torch_sdpa") no existen en ninguna version, asi que este bucle siempre
+    # fallaba entero y se caia al fallback sin que nadie lo viera: el mensaje
+    # estaba silenciado. No importaba porque el backend por defecto de diffusers
+    # ya es `native` (el SDPA de PyTorch), que no materializa la matriz n^2.
+    #
+    # The REAL diffusers names. The ones here before ("sdpa", "torch_sdpa") exist
+    # in no version, so this loop always failed completely and fell through
+    # unseen, the message being silenced. It did not matter because diffusers'
+    # default backend is already `native` (PyTorch SDPA), which does not
+    # materialise the n^2 matrix.
+    # SageAttention exige fp16 o bf16 en q/k/v y revienta con un assert si le
+    # llegan en fp32:
+    #
+    #   sageattention/core.py:707
+    #   AssertionError: Input tensors must be in dtype of torch.float16 or bfloat16
+    #
+    # Este entrenador corre con use_autocast=False a proposito, porque el forward
+    # de H3 hace sus propios casts y hay modulos que TIENEN que quedarse en fp32
+    # (_keep_in_fp32_modules). Con autocast apagado, q/k/v salen en fp32 y Sage no
+    # puede usarse. Se detecta ANTES de cargar los 39 GB del modelo: morir en el
+    # primer paso despues de cinco minutos de carga no es una forma aceptable de
+    # descubrir una incompatibilidad conocida.
+    #
+    # SageAttention requires fp16/bf16 for q/k/v and asserts on fp32. This trainer
+    # runs with use_autocast=False on purpose, so q/k/v come out in fp32 and Sage
+    # cannot be used. Detected BEFORE loading the model's 39 GB: dying on the
+    # first step after a five-minute load is not an acceptable way to discover a
+    # known incompatibility.
+    # ------------------------------------------------------------------
+    # SAGEATTENTION NO SIRVE PARA ENTRENAR. NO ES UN PROBLEMA DE dtype.
+    #
+    # El aviso que habia aqui culpaba al dtype: q/k/v salian en fp32 y el kernel
+    # exige fp16/bf16. Era verdad pero no era la causa, y encima el aviso no
+    # saltaba nunca, porque miraba `not USE_AUTOCAST` y autocast esta ENCENDIDO;
+    # q/k/v vuelven a fp32 despues, en attn.norm_q y en el rotary. Por eso el
+    # error seguia apareciendo.
+    #
+    # El fallback tampoco podia funcionar: envolvia set_attention_backend(), que
+    # se registra sin protestar. El AssertionError sale mucho despues, dentro del
+    # forward, en dispatch_attention_fn -> _sage_attention. Un try/except
+    # alrededor del registro no puede atrapar algo que ocurre en otra pila.
+    #
+    # Y lo de fondo: el paquete sageattention NO TIENE backward. Ni una
+    # autograd.Function, ni un save_for_backward, ni un ctx en todo el modulo:
+    # son kernels de inferencia. Medido en esta misma instalacion, la salida de
+    # sageattn() viene con requires_grad=False y grad_fn=None.
+    #
+    # Eso convierte el "arreglo" evidente -- castear q/k/v a bf16 -- en una
+    # trampa: el entrenamiento NO petaria, porque la rama residual
+    # (hidden = hidden + attn(...)) mantiene el grafo vivo. Simplemente los LoRA
+    # de to_q, to_k y to_v recibirian gradiente CERO y saldria un LoRA a medio
+    # entrenar sin un solo mensaje de error. Mejor negarse aqui, en voz alta.
+    #
+    # Para previews (inferencia, sin backward) Sage si valdria. No esta hecho.
+    #
+    # SAGEATTENTION CANNOT TRAIN, AND IT IS NOT A dtype PROBLEM. The old warning
+    # blamed the dtype -- q/k/v arrive fp32 and the kernel demands fp16/bf16 --
+    # which was true but not the cause, and it never fired anyway because it
+    # tested `not USE_AUTOCAST` while autocast is ON (q/k/v go back to fp32 later,
+    # in attn.norm_q and the rotary). The fallback could not work either: it
+    # wrapped set_attention_backend(), which registers happily; the AssertionError
+    # comes much later inside the forward, in dispatch_attention_fn ->
+    # _sage_attention, on a different stack. And underneath all that, the
+    # sageattention package has NO backward -- not one autograd.Function,
+    # save_for_backward or ctx in the whole module; they are inference kernels.
+    # Measured on this install, sageattn() returns requires_grad=False, grad_fn
+    # None. That makes the obvious "fix" (cast q/k/v to bf16) a trap: training
+    # would NOT crash, because the residual branch keeps the graph alive -- the
+    # to_q/to_k/to_v LoRAs would just get ZERO gradient and produce a half-trained
+    # LoRA with no error message. Better to refuse here, loudly. For previews
+    # (inference, no backward) Sage would be fine; that is not wired up.
+    # ------------------------------------------------------------------
+    if USE_SAGE_ATTENTION:
+        log_print("[ATTN][WARN] SageAttention is ON but it CANNOT be used for training: the "
+                  "package ships inference kernels with no backward pass (sageattn() returns "
+                  "requires_grad=False, grad_fn=None), so the q/k/v LoRAs would silently "
+                  "receive zero gradient. Using native attention, which is already "
+                  "memory-efficient. / SageAttention esta activada pero NO se puede usar para "
+                  "entrenar: el paquete son kernels de inferencia sin backward (sageattn() "
+                  "devuelve requires_grad=False y grad_fn=None), asi que los LoRA de q/k/v se "
+                  "quedarian sin gradiente y nadie avisaria. Se usa la atencion nativa, que ya "
+                  "es eficiente en memoria.", flush=True)
+    candidatos = ("native",)
+
     if hasattr(transformer, "set_attention_backend"):
-        for backend in ("sdpa", "torch_sdpa", "flash", "_flash_3_hub", "xformers"):
+        for backend in candidatos:
             try:
                 transformer.set_attention_backend(backend)
-                log_print("[ATTN] Attention backend / Backend de atencion: {}".format(backend),
-                          flush=True)
+                if backend.startswith("sage"):
+                    log_print("[ATTN] SageAttention active ({}). Attention numerics are "
+                              "quantized: faster and lighter, but not bit-exact against "
+                              "native. / SageAttention activa ({}). La numerica de la "
+                              "atencion va cuantizada: mas rapida y ligera, pero no "
+                              "identica a la nativa.".format(backend, backend), flush=True)
+                else:
+                    log_print("[ATTN] Attention backend / Backend de atencion: {}".format(backend),
+                              flush=True)
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                if backend.startswith("sage"):
+                    log_print("[ATTN][WARN] SageAttention requested but unavailable ({}): {}. "
+                              "Falling back. / Se pidio SageAttention pero no esta disponible "
+                              "({}): {}. Se usa el siguiente.".format(backend, exc, backend, exc),
+                              flush=True)
 
     try:
         transformer.enable_xformers_memory_efficient_attention()
@@ -3634,9 +3761,16 @@ def enable_memory_efficient_attention(transformer):
     try:
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
-        log_print("[ATTN] PyTorch SDP flash/mem-efficient activado.", flush=True)
+        log_print("[ATTN] Fell back to global PyTorch SDP flags (flash + mem-efficient). "
+                  "The model may still use its own attention path. / Se han puesto las "
+                  "banderas globales de SDP de PyTorch; el modelo puede seguir usando su "
+                  "propia ruta de atencion.", flush=True)
     except Exception:
-        pass
+        log_print("[ATTN][WARN] No memory-efficient attention backend could be enabled. With "
+                  "long video sequences the n^2 attention matrix will be materialised and OOM "
+                  "is likely. / No se pudo activar ningun backend de atencion eficiente. Con "
+                  "secuencias largas de video se materializara la matriz n^2 y el OOM es "
+                  "probable.", flush=True)
 
 
 def enable_gradient_checkpointing_safe(transformer, model):
@@ -4335,6 +4469,38 @@ def spill_report():
               flush=True)
 
 
+def _new_linear4bit_empty(in_features, out_features, bias=False, **kwargs):
+    """Crea un Linear4bit SIN inicializar sus pesos.
+
+    nn.Linear.__init__ reserva la matriz completa y la rellena con kaiming
+    uniform. Aqui ese relleno se tira dos lineas despues, al asignar el peso NF4
+    real, pero cuesta lo que cuesta: medido sobre los tamanos de H3 salen 0,359 s
+    por capa, y con 370 capas son los 133 segundos que tardaba el arranque.
+    Practicamente TODO el tiempo de carga era generar numeros aleatorios para
+    descartarlos.
+
+    Construyendolo en el dispositivo `meta` no se reserva memoria ni se rellena
+    nada: la misma capa de 5376x28672 pasa de 0,638 s a 0,0003 s. Despues se
+    devuelve a CPU con to_empty(), que reserva el hueco sin escribir en el.
+
+    El sesgo SI se materializa: es pequeno y el llamante puede copiarle datos.
+
+    Creates a Linear4bit WITHOUT initializing its weights. nn.Linear.__init__
+    allocates the full matrix and fills it with kaiming uniform; that fill is
+    discarded two lines later when the real NF4 weight is assigned, but it costs
+    0.359 s per layer on H3's shapes -- the 133 seconds the load used to take.
+    Almost the entire load was generating random numbers to throw away.
+    Building on the `meta` device allocates and fills nothing. The bias IS
+    materialised: it is small and the caller may copy data into it.
+    """
+    with torch.device("meta"):
+        layer = Linear4bit(in_features, out_features, bias=bias,
+                           compute_dtype=torch.bfloat16, **kwargs)
+    # to_empty reserva el almacenamiento en CPU sin inicializarlo.
+    # to_empty allocates CPU storage without initialising it.
+    return layer.to_empty(device="cpu")
+
+
 def _move_params4bit_to_device(p, device, disk_view=None):
     """
     Mueve un Params4bit sin permitir que bitsandbytes materialice el peso
@@ -4766,6 +4932,155 @@ def _nf4_swap_backward_hook(module, grad_input, grad_output):
     return None
 
 
+# ---------------------------------------------------------------------------
+# OVERHEAD DE ENTRENAMIENTO EN FUNCION DE LA SECUENCIA.
+#
+# El plan restaba un overhead FIJO de 2,5 GB antes de repartir bloques. Ese
+# numero no estaba mal: estaba calibrado con imagenes, donde la secuencia son
+# 300-700 tokens. Nadie lo reviso al llegar el video, y un clip son 1.100-2.400
+# tokens: el plan creia tener 2,5 GB de margen cuando necesitaba 5,5, pedia 30
+# bloques residentes y saturaba la tarjeta. Ese fue el primer OOM del proyecto.
+#
+# Calibrado con seis medidas reales de pico en dos geometrias (256x256/107f y
+# 192x192/124f) y de 2 a 25 bloques residentes:
+#
+#     pico = 4,30 + 0,00216 x tokens + 0,3332 x N        (GiB)
+#
+# de donde, quitando base y swap que el plan ya cuenta aparte:
+#
+#     activaciones = 1,056 + 0,002161 x tokens
+#
+# Error maximo 0,33 GiB en las seis. Y da 2,14 GB para 500 tokens, o sea que
+# REPRODUCE el 2,5 antiguo en el caso para el que se calibro: no es un cambio de
+# criterio, es la misma constante convertida en la recta que siempre fue.
+#
+# The plan subtracted a FIXED 2.5 GB overhead before handing out blocks. That
+# number was not wrong -- it was calibrated on images, where the sequence is
+# 300-700 tokens. Nobody revisited it when video arrived, and a clip is
+# 1,100-2,400 tokens: the plan thought it had 2.5 GB of headroom when it needed
+# 5.5, asked for 30 resident blocks and saturated the card. Calibrated against
+# six real peak measurements across two geometries and 2-25 resident blocks, with
+# a 0.33 GiB worst-case error -- and it yields 2.14 GB at 500 tokens, so it
+# REPRODUCES the old constant in the case it was calibrated for.
+# ---------------------------------------------------------------------------
+# Reajustado con OCHO picos reales (2-25 bloques, 1.332 y 2.048 tokens):
+#     pico = 3,264 + 0,002340 x tokens + 0,3542 x N      error maximo 0,24 GiB
+# donde `tokens` son los de la muestra MAS GRANDE, leidos de latent_shape, no
+# una media: el pico lo marca la peor muestra. / where `tokens` is the LARGEST
+# sample's, read from latent_shape rather than averaged.
+# Quitando base (1,904) y swap (1,34) queda la parte de activaciones. El termino
+# en N que sobra (0,021/bloque, la diferencia entre los 0,3542 medidos y los
+# 0,3332 que pesa un bloque NF4 -- es el workspace de dequantizacion) se dobla en
+# la constante usando un N tipico de 17, porque el plan necesita el overhead
+# ANTES de decidir cuantos bloques caben y no puede depender de N.
+#
+# Refit against EIGHT real peaks (2-25 blocks, 1,332 and 2,048 tokens), worst
+# error 0.24 GiB. The leftover per-block term (0.021/block: the gap between the
+# measured 0.3542 and the 0.3332 a NF4 block weighs, i.e. dequant workspace) is
+# folded into the constant at a typical N of 17, because the plan needs the
+# overhead BEFORE deciding how many blocks fit and so cannot depend on N.
+ACT_BASE_GB = 0.377
+ACT_PER_TOKEN_GB = 0.002340
+
+
+def cache_sequence_tokens(cache_dir):
+    """Tokens de video por muestra, leidos de cache_info.json. 0 si no se sabe.
+
+    Un token cubre 32x32 pixeles reales (VAE /16 y patch 2x2), asi que
+    tokens_por_fotograma = area / 1024. Los fotogramas LATENTES salen de la
+    geometria 17n+5 de H3: 5 latentes por cada 17 de pixel, mas 2.
+
+    Se usa el area OBJETIVO y no los buckets reales de cada clip: los buckets
+    redondean a multiplos de 32 y varian un 10% entre si, pero el area objetivo
+    es justo la media alrededor de la que se reparten, que es con lo que se
+    calibro la recta de arriba.
+
+    Video tokens per sample from cache_info.json, 0 if unknown. One token covers
+    32x32 real pixels, so tokens_per_frame = area / 1024; latent frames follow
+    H3's 17n+5 geometry. The TARGET area is used rather than each clip's bucket:
+    buckets round to multiples of 32 and vary ~10%, but the target area is the
+    mean they scatter around, which is what the line above was calibrated on.
+    """
+    # Se lee el latent_shape de cada muestra y se coge el MAXIMO: el pico de
+    # VRAM lo marca la muestra mas grande, no la media. Con el patch (1,2,2) de
+    # H3, latent_shape [B, C, T, H, W] son T x (H/2) x (W/2) tokens.
+    #
+    # No sirve estimarlo desde cache_info: en un dataset MIXTO num_frames vale
+    # None (no hay un solo valor, cada muestra lleva el suyo) y la estimacion
+    # daria el tamano de una imagen, subestimando el overhead en mas de 3 GB y
+    # repartiendo bloques de mas hasta el OOM.
+    #
+    # Each sample's latent_shape is read and the MAXIMUM taken: the VRAM peak is
+    # set by the largest sample. Estimating from cache_info does not work: on a
+    # MIXED dataset num_frames is None (there is no single value) and the estimate
+    # would return an image-sized sequence, underestimating the overhead by over
+    # 3 GB and handing out enough blocks to OOM.
+    mayor = 0
+    try:
+        for nombre in os.listdir(cache_dir):
+            if not nombre.endswith("_info.json") or nombre.startswith("_"):
+                continue
+            if nombre == "cache_info.json":
+                continue
+            try:
+                with open(os.path.join(cache_dir, nombre), "r", encoding="utf-8") as fh:
+                    shape = json.load(fh).get("latent_shape")
+            except Exception:
+                continue
+            if shape and len(shape) >= 5:
+                mayor = max(mayor, int(shape[2]) * (int(shape[3]) // 2) * (int(shape[4]) // 2))
+    except Exception:
+        return 0
+
+    if mayor > 0:
+        return mayor
+
+    # Cache antigua sin latent_shape: se estima desde la geometria declarada.
+    # Older cache with no latent_shape: estimate from the declared geometry.
+    try:
+        with open(os.path.join(cache_dir, "cache_info.json"), "r", encoding="utf-8") as fh:
+            info = json.load(fh)
+    except Exception:
+        return 0
+
+    area = int(info.get("target_area", 0) or 0)
+    frames = int(info.get("num_frames", 1) or 1)
+    if area <= 0:
+        return 0
+    latentes = 1 if frames <= 1 else 5 * ((frames - 5) // 17) + 2
+    return int(round(area / 1024.0)) * max(1, latentes)
+
+
+def training_overhead_gb(cache_dir, fallback):
+    """GB que hay que reservar para el paso de entrenamiento, no para los pesos.
+
+    Si no se puede leer la cache se devuelve el valor configurado, que es lo
+    unico honesto: inventarse una secuencia seria peor que el numero fijo.
+
+    GB to reserve for the training step rather than for weights. When the cache
+    cannot be read the configured value is returned -- inventing a sequence
+    length would be worse than the fixed number.
+    """
+    tokens = cache_sequence_tokens(cache_dir)
+    if tokens <= 0:
+        return float(fallback), 0
+
+    # Nunca menos conservador que el valor fijo. La recta se calibro con VIDEO
+    # (1.300-2.000 tokens) y extrapolada hacia abajo da 1,78 GB para una imagen de
+    # 500, por debajo de los 2,5 que llevan funcionando desde siempre en imagen.
+    # Bajar ahi seria cambiar, sin una sola medida nueva, el reparto de un caso
+    # que ya va bien. El cruce esta en ~790 tokens: por debajo manda el fijo, por
+    # encima manda la recta, que es justo donde el fijo se quedaba corto.
+    #
+    # Never less conservative than the fixed value. The line was calibrated on
+    # VIDEO (1,300-2,000 tokens) and extrapolating down gives 1.78 GB for a 500
+    # token image, below the 2.5 that has always worked for images -- lowering it
+    # would change a working case without a single new measurement. The crossover
+    # sits at ~790 tokens: below it the fixed value wins, above it the line does,
+    # which is exactly where the fixed value fell short.
+    return max(float(fallback), ACT_BASE_GB + ACT_PER_TOKEN_GB * tokens), tokens
+
+
 def apply_nf4_block_swap_hooks(block_list, start_index):
     hooks = []
 
@@ -5008,10 +5323,30 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
     # The training step adds grads, AdamW state, activations, bnb dequant peaks and
     # cuBLAS/SDPA workspaces on top of resident weights. None of it was subtracted.
     # --------------------------------------------------------------------
-    overhead_bytes = max(0.0, float(VRAM_TRAINING_OVERHEAD_GB)) * 1e9
+    overhead_gb, seq_tokens = training_overhead_gb(CACHE_DIR, VRAM_TRAINING_OVERHEAD_GB)
+    overhead_bytes = max(0.0, float(overhead_gb)) * 1e9
     max_base_alloc = max(0.0, float(target_vram_gb) * 1e9 - overhead_bytes)
 
     if overhead_bytes > 0:
+        if seq_tokens > 0:
+            log_print(
+                "[VRAM-PLAN] Secuencia de {} tokens -> overhead de entrenamiento {:.2f} GB "
+                "(1,056 + 0,002161 x tokens, calibrado sobre 6 picos reales). El valor fijo "
+                "de {:.2f} GB solo valia para imagenes. / {} token sequence -> {:.2f} GB "
+                "training overhead; the fixed {:.2f} GB only held for images."
+                .format(seq_tokens, overhead_gb, float(VRAM_TRAINING_OVERHEAD_GB),
+                        seq_tokens, overhead_gb, float(VRAM_TRAINING_OVERHEAD_GB)),
+                flush=True,
+            )
+        else:
+            log_print(
+                "[VRAM-PLAN][WARN] No se pudo leer la geometria de la cache; se usa el "
+                "overhead fijo de {:.2f} GB, que esta calibrado para IMAGENES y se queda "
+                "corto con video. / Could not read the cache geometry; falling back to the "
+                "fixed {:.2f} GB overhead, which is calibrated for IMAGES and is too small "
+                "for video.".format(overhead_gb, overhead_gb),
+                flush=True,
+            )
         log_print(
             "[VRAM-PLAN] Presupuesto residente {:.2f} GB - overhead de entrenamiento "
             "{:.2f} GB = {:.2f} GB para pesos. / resident budget minus training "
@@ -5134,6 +5469,25 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
         if estimated <= max_base_alloc:
             start_index = s
             break
+
+    # Un valor manual manda sobre el plan. Se respeta aunque sea MAYOR que el
+    # calculado: quien lo escribe esta midiendo, y si se pasa lo dira el OOM.
+    # Lo unico que se recorta es el limite fisico de bloques.
+    #
+    # A manual value overrides the plan, even when it is HIGHER than the computed
+    # one: whoever typed it is measuring, and an OOM will say if it was too much.
+    # Only the physical block count is clamped.
+    if RESIDENT_BLOCKS > 0:
+        forzado = min(int(RESIDENT_BLOCKS), n_blocks)
+        log_print(
+            "[VRAM-PLAN] Manual override: {} resident blocks (the plan said {}). "
+            "The plan only counts weights; with long video sequences the "
+            "activations do not fit its overhead. / Forzado manual: {} bloques "
+            "residentes (el plan decia {}). El plan solo cuenta pesos; con "
+            "secuencias largas de video las activaciones no caben en su "
+            "overhead.".format(forzado, start_index, forzado, start_index),
+            flush=True)
+        start_index = forzado
 
     log_print(
         "[VRAM-PLAN] Plan teórico: {} bloques residentes (0-{}), {} bloques swapeados ({}-{}).".format(
@@ -7593,7 +7947,37 @@ def train_minimaxh3():
     optimizer.zero_grad(set_to_none=True)
 
     running_loss = resumed_running_loss
+
+    # Dos medidas del tiempo por paso, porque sirven para cosas distintas.
+    #
+    #   avg_time  EMA con alpha 0,1, o sea una ventana efectiva de ~10 pasos.
+    #             Reacciona rapido, que es lo que quiere el ETA, pero con un
+    #             dataset de buckets mezclados NO converge: se pasea segun que
+    #             clips hayan caido en los ultimos 10 pasos. Medido en un cache
+    #             de 9 clips, el mas barato y el mas caro se llevan un 11% de
+    #             tokens, asi que esta cifra baila varias decimas eternamente y
+    #             no vale para comparar dos configuraciones.
+    #
+    #   mean_time media de TODOS los pasos de esta sesion. Promedia los buckets,
+    #             asi que se asienta de verdad. Es la que hay que mirar para
+    #             decidir si 18 bloques residentes van mejor que 20.
+    #
+    # No se restaura al reanudar: mezclar los tiempos de una sesion anterior,
+    # quiza con otra configuracion, daria una media que no describe nada.
+    #
+    # Two measures of step time, for different jobs. `avg_time` is an EMA with
+    # alpha 0.1 (~10 step window): reactive, which is what the ETA wants, but on
+    # a mixed-bucket dataset it never converges -- it drifts with whichever clips
+    # landed in the last ten steps (measured 11% token spread across a 9 clip
+    # cache), so it cannot be used to compare two configurations. `mean_time`
+    # averages every step of this session, so it averages the buckets out and
+    # actually settles: that is the number to read when deciding whether 18
+    # resident blocks beat 20. It is not restored on resume, since mixing in a
+    # previous session's timings -- possibly from another configuration -- would
+    # produce a mean that describes nothing.
     avg_time = 0.0
+    step_time_sum = 0.0
+    step_time_count = 0
     ema_loss = resumed_ema_loss
 
     # ------------------------------------------------------------------
@@ -8566,6 +8950,9 @@ def train_minimaxh3():
 
             elapsed = time.time() - t0
             avg_time = elapsed if avg_time == 0 else (0.1 * elapsed + 0.9 * avg_time)
+            step_time_sum += elapsed
+            step_time_count += 1
+            mean_time = step_time_sum / step_time_count
 
             eta_s = (TOTAL_STEPS - step) * avg_time
 
@@ -8597,21 +8984,39 @@ def train_minimaxh3():
             else:
                 display_grad_norm = float(grad_norm)
 
+            # El lr se mantiene aunque hoy sea constante: en cuanto haya un
+            # programa de lr (alto al principio, bajo al final) esta es la unica
+            # ventana para ver que lo esta siguiendo.
+            #
+            # De los tres gnorm que habia aqui solo queda uno. gnorm y gnorm_acc
+            # eran literalmente la misma variable impresa dos veces (grad_norm =
+            # gnorm_acc unas lineas mas arriba), y gnorm_grad vale 0 salvo que se
+            # active su sonda. Ademas iban con {:.17g}, que son 17 cifras
+            # significativas de una magnitud que se lee de un vistazo: cuatro
+            # decimales dicen lo mismo y dejan sitio en la linea.
+            #
+            # The lr stays even though it is constant today: the moment there is
+            # an lr schedule (high early, low late) this is the only window into
+            # whether it is being followed. Of the three gnorms only one remains:
+            # gnorm and gnorm_acc were the same variable printed twice
+            # (grad_norm = gnorm_acc a few lines up) and gnorm_grad is 0 unless
+            # its probe is enabled. They also used {:.17g} -- 17 significant
+            # digits of a number read at a glance; four decimals say the same and
+            # leave room on the line.
             progress_line = (
                 "Step {:4d}/{} [{}] {:5.1f}% | "
-                "Loss {:.4f} | lr {:.2e} | {:.2f}s/it | ETA {} | "
-                "gnorm {:.17g} | gnorm_grad {:.17g} | gnorm_acc {:.17g}".format(
+                "Loss {:.4f} | lr {:.2e} | {:.2f}s/it (now {:.2f}) | ETA {} | "
+                "gnorm {:.4f}".format(
                     step,
                     TOTAL_STEPS,
                     barra,
                     pct * 100,
                     display_loss,
                     current_lr,
+                    mean_time,
                     avg_time,
                     eta,
                     display_grad_norm,
-                    float(gnorm_grad),
-                    float(gnorm_acc),
                 )
             )
 

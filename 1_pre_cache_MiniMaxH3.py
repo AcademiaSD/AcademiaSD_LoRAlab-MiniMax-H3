@@ -35,9 +35,12 @@ import os
 import gc
 import json
 import math
+import subprocess
 import sys
 import time
 import traceback
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms.functional as F_vision
@@ -74,33 +77,6 @@ class _Bi(str):
 def L(en, es):
     """Bilingual single-line message / Mensaje bilingue en una sola linea."""
     return _Bi(en, es)
-
-
-def new_layer_empty(cls, in_features, out_features, bias=False, **kwargs):
-    """Crea una capa lineal SIN inicializar sus pesos.
-
-    nn.Linear.__init__ reserva la matriz completa y la rellena con kaiming
-    uniform. En todos los sitios donde se usa aqui, ese relleno se descarta acto
-    seguido al asignarle el peso real del checkpoint, pero cuesta lo que cuesta:
-    medido sobre los tamanos de este modelo son ~0,58 s por capa grande, y con
-    370 capas eran los ~133 segundos que tardaba el arranque. Practicamente TODO
-    el tiempo de carga era generar numeros aleatorios para tirarlos.
-
-    Construida en el dispositivo `meta` no se reserva memoria ni se rellena nada;
-    `to_empty` reserva despues el hueco en CPU sin escribir en el. La capa queda
-    identica: 941x mas rapido, mismos pesos.
-
-    Creates a linear layer WITHOUT initializing its weights. nn.Linear.__init__
-    allocates the full matrix and fills it with kaiming uniform; everywhere it is
-    used here that fill is discarded immediately when the checkpoint weight is
-    assigned, yet it costs ~0.58 s per large layer -- the ~133 seconds the load
-    used to take. Almost the entire load was generating random numbers to throw
-    away. Built on `meta` nothing is allocated or filled; `to_empty` then reserves
-    CPU storage without writing to it. Identical layer, 941x faster.
-    """
-    with torch.device("meta"):
-        layer = cls(in_features, out_features, bias=bias, **kwargs)
-    return layer.to_empty(device="cpu")
 
 
 def log_dev(msg, level=1):
@@ -315,6 +291,56 @@ class H3EncoderFCN3D(nn.Module):
         return self.conv_out(torch.nn.functional.silu(self.norm_out(h)))
 
 
+# Geometria temporal del VAE de H3, tomada de AutoencoderKLMiniMaxH3:
+#
+#   "The temporal geometry is fixed by clip_length (17 pixel frames per encoder
+#    chunk) and token_drop (3 trailing latent frames dropped per encode):
+#    17 * n + 5 pixel frames map to 5 * n + 2 latent frames."
+#
+# El numero de fotogramas de un clip NO es libre: tiene que ser 17n+5. Ojo, no
+# es el patron 4k+1 de Wan o Hunyuan, donde el primer fotograma va aparte.
+#
+# H3's temporal geometry, from the reference VAE. A clip's frame count is not
+# free: it must be 17n+5. Note this is NOT the 4k+1 pattern of Wan or Hunyuan,
+# where the first frame is handled separately.
+H3_CLIP_LENGTH = 17
+H3_TOKEN_DROP = 3
+H3_BASE_FRAMES = 5
+
+
+def h3_valid_frames(count, target=0):
+    """Fotogramas a conservar de un clip de `count`.
+
+    Con `target` (el campo Frames de la pre-cache) se pide un numero concreto y
+    se usa si el clip da para tanto; si no, el mayor 17n+5 que quepa. El objetivo
+    tambien se baja a la rejilla, para que un valor raro en el JSON no cuele una
+    geometria que el VAE no puede producir.
+
+    Frames to keep from a clip of `count`. With `target` a specific count is
+    requested and used if the clip is long enough, otherwise the largest 17n+5
+    that fits. The target is snapped to the grid too, so an odd value in the JSON
+    cannot sneak in a geometry the VAE cannot produce.
+    """
+    if count < H3_BASE_FRAMES:
+        return None
+    mayor = H3_CLIP_LENGTH * ((count - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+    if target and target >= H3_BASE_FRAMES:
+        objetivo = H3_CLIP_LENGTH * ((target - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+        return min(objetivo, mayor)
+    return mayor
+
+
+def h3_latent_frames(count):
+    """Latentes que produce un clip de `count` fotogramas 17n+5."""
+    return 5 * ((count - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + 2
+
+
+def h3_pixel_frames(latents):
+    """Inversa: fotogramas de pixel que produjeron `latents` latentes.
+    Inverse: pixel frames that produced `latents` latent frames."""
+    return H3_CLIP_LENGTH * ((latents - 2) // 5) + H3_BASE_FRAMES
+
+
 class MiniMaxH3VideoVAEEncoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -327,18 +353,68 @@ class MiniMaxH3VideoVAEEncoder(nn.Module):
 
     @torch.no_grad()
     def encode(self, x):
-        """x in [-1,1] -> normalized latent [B,24,1,H/16,W/16].
-        x en [-1,1] -> latente normalizado [B,24,1,H/16,W/16]."""
+        """x en [-1,1] [B,3,T,H,W] -> latente normalizado [B,24,T',H/16,W/16].
+
+        Una imagen (T=1) pasa por el camino espacial y da un latente. Un clip se
+        codifica POR TROZOS de `clip_length` fotogramas, que es lo que hace el
+        VAE de referencia y NO una optimizacion:
+
+          - las convoluciones temporales son causales y se reinician en cada
+            trozo, asi que el contexto que ve el encoder no es el mismo si se le
+            pasa el clip entero de una vez;
+          - los recuentos no coinciden. Medido con este mismo encoder: 73
+            fotogramas dan 22 latentes troceando y 19 de una tirada. Solo el
+            primero cuadra con la geometria del modelo (17n+5 -> 5n+2).
+
+        Codificarlo del tiron "funciona" —salen latentes y no falla nada— y
+        produce un condicionamiento que el modelo nunca vio en entrenamiento.
+
+        A still image (T=1) goes through the spatial path. A clip is encoded in
+        `clip_length` CHUNKS, which is what the reference VAE does and is NOT an
+        optimization: the temporal convolutions are causal and restart on every
+        chunk, and the counts differ (73 frames give 22 latents chunked, 19 in
+        one pass; only the former matches the model's 17n+5 -> 5n+2 geometry).
+        Encoding in one pass "works" and yields conditioning the model was never
+        trained on.
+        """
         if x.ndim == 4:
             x = x.unsqueeze(2)
-        if x.ndim != 5 or x.shape[2] != 1:
+        if x.ndim != 5:
             raise ValueError(
-                L("MiniMax H3 image pre-cache requires [B,3,T,H,W] with T=1",
-                  "El pre-cache de imagen de MiniMax H3 requiere [B,3,T,H,W] con T=1"))
+                L("MiniMax H3 pre-cache requires [B,3,T,H,W]",
+                  "El pre-cache de MiniMax H3 requiere [B,3,T,H,W]"))
+
         x = (x + 1.0) * 0.5
         x = (x - self.pixel_mean.to(x)) / self.pixel_std.to(x)
-        moments = self.quant_conv(self.encoder(x))
-        moments = moments[:, :, -1:, :, :]
+
+        frames = x.shape[2]
+        if frames == 1:
+            moments = self.quant_conv(self.encoder(x))
+            moments = moments[:, :, -1:, :, :]
+        else:
+            # Relleno hasta multiplo de clip_length repitiendo el ULTIMO
+            # fotograma. Esos latentes de relleno son justo los que se lleva
+            # `token_drop` despues: las dos cosas estan disenadas para
+            # cancelarse, y por eso 17n+5 -> 5n+2 sale exacto.
+            # Pad to a multiple of clip_length by repeating the LAST frame. Those
+            # padding latents are exactly what `token_drop` removes afterwards:
+            # the two are designed to cancel, which is why 17n+5 -> 5n+2 is exact.
+            if frames % H3_CLIP_LENGTH:
+                falta = (-frames) % H3_CLIP_LENGTH
+                x = torch.cat([x, x[:, :, -1:].repeat(1, 1, falta, 1, 1)], dim=2)
+
+            # Trozo a trozo y no todo junto: con 73 fotogramas a 576x576 el pico
+            # de activaciones del encoder no cabria en una tarjeta de 16 GB.
+            # Chunk by chunk rather than all at once: with 73 frames at 576x576
+            # the encoder's activation peak would not fit on a 16 GB card.
+            trozos = []
+            for i in range(x.shape[2] // H3_CLIP_LENGTH):
+                corte = x[:, :, i * H3_CLIP_LENGTH:(i + 1) * H3_CLIP_LENGTH]
+                trozos.append(self.quant_conv(self.encoder(corte)))
+            moments = torch.cat(trozos, dim=2)
+            if H3_TOKEN_DROP > 0:
+                moments = moments[:, :, :-H3_TOKEN_DROP]
+
         mean = torch.chunk(moments.float(), 2, dim=1)[0]
         lm = self.latents_mean.view(1, -1, 1, 1, 1).to(mean)
         ls = self.latents_std.view(1, -1, 1, 1, 1).to(mean)
@@ -579,7 +655,13 @@ else:
 # instead of by renaming the folder.
 # La reutilizacion de una cache obsoleta se evita con la comprobacion de version de formato
 # en preprocess_minimaxh3(), no renombrando la carpeta.
-CACHE_FORMAT_VERSION = 3
+# v4: la cache puede contener clips. Los .pt de video pasan de [1,24,1,h,w] a
+# [1,24,T',h,w], asi que una cache v3 mezclada con una v4 daria geometrias
+# distintas en el mismo entrenamiento. Subir la version fuerza a regenerarla.
+# v4: the cache can hold clips. Video .pt files go from [1,24,1,h,w] to
+# [1,24,T',h,w], so mixing a v3 cache with a v4 one would feed two different
+# geometries into the same run. Bumping the version forces a rebuild.
+CACHE_FORMAT_VERSION = 4
 
 MULTIPLE = max(32, MULTIPLE)
 
@@ -1631,6 +1713,31 @@ def verify_language_weights(model):
     return checks
 
 
+def new_layer_empty(cls, in_features, out_features, bias=False, **kwargs):
+    """Crea una capa lineal SIN inicializar sus pesos.
+
+    nn.Linear.__init__ reserva la matriz completa y la rellena con kaiming
+    uniform. Ese relleno se descarta acto seguido, al asignarle el peso real del
+    checkpoint, pero cuesta lo suyo: medido sobre los tamanos de este modelo son
+    ~0,58 s por capa grande, y con cientos de capas es casi todo el tiempo de
+    arranque. En el entrenador esto suponia 133 de los 133 segundos de carga.
+
+    Construyendola en el dispositivo `meta` no se reserva memoria ni se rellena
+    nada; `to_empty` reserva luego el hueco en CPU sin escribir en el. La capa
+    queda identica.
+
+    Creates a linear layer WITHOUT initializing its weights. nn.Linear.__init__
+    allocates the full matrix and fills it with kaiming uniform; that fill is
+    discarded immediately when the checkpoint weight is assigned, yet it costs
+    ~0.58 s per large layer -- in the trainer it was 133 of the 133 seconds of
+    load time. Building on `meta` allocates and fills nothing; `to_empty` then
+    reserves CPU storage without writing to it.
+    """
+    with torch.device("meta"):
+        layer = cls(in_features, out_features, bias=bias, **kwargs)
+    return layer.to_empty(device="cpu")
+
+
 def load_text_encoder_from_nf4(nf4_model_id, original_model_id, full_model=False):
     """Load the Qwen3-VL text encoder from the NF4 export.
     Carga el text encoder Qwen3-VL desde el export NF4.
@@ -1883,8 +1990,7 @@ def load_text_encoder_from_nf4(nf4_model_id, original_model_id, full_model=False
                     weight = f.get_tensor("weight")
                     bias = f.get_tensor("bias") if info.get("bias", False) else None
                 layer = new_layer_empty(nn.Linear,
-                                        int(info["in_features"]),
-                                        int(info["out_features"]),
+                                        int(info["in_features"]), int(info["out_features"]),
                                         bias=info.get("bias", False))
                 layer.weight = nn.Parameter(weight.to(dtype=torch.bfloat16), requires_grad=False)
                 if bias is not None:
@@ -2279,6 +2385,90 @@ def selftest_prompt_discrimination(text_encoder, processor):
 # ============================================================================
 # LATENT ENCODING / CODIFICACION DE LATENTES
 # ============================================================================
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a")
+
+
+def is_video(filename):
+    return filename.lower().endswith(VIDEO_EXTS)
+
+
+def is_audio(filename):
+    """Reservado: el audio aun no se cachea, pero la rama existe para que
+    anadirlo sea una funcion mas y no rehacer el recorrido del dataset.
+    Reserved: audio is not cached yet, but the branch exists so that adding it
+    is one more function rather than reworking the dataset walk."""
+    return filename.lower().endswith(AUDIO_EXTS)
+
+
+def _ffbin(name):
+    import shutil
+    return shutil.which(name) or shutil.which(name + ".exe")
+
+
+def probe_video(path):
+    """(fotogramas, ancho, alto) contados de verdad, o None.
+
+    Se cuentan con -count_frames en vez de leer nb_frames del contenedor, que en
+    muchos mp4 viene vacio o mentiroso; aqui un recuento erroneo rompe la
+    geometria 17n+5 sin avisar.
+    Counted with -count_frames instead of the container's nb_frames, which is
+    often missing or wrong in mp4; here a bad count silently breaks the 17n+5
+    geometry."""
+    probe = _ffbin("ffprobe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=nb_read_frames,width,height",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=180,
+        ).stdout.strip()
+        w, h, frames = out.split(",")
+        return int(frames), int(w), int(h)
+    except Exception:
+        return None
+
+
+def read_video_frames(path, count, width, height):
+    """Los `count` primeros fotogramas, ya escalados y recortados a width x height.
+
+    Escala y recorte los hace ffmpeg y no PIL: son 73 fotogramas por clip y
+    hacerlo en Python multiplica por diez el tiempo de la fase 2 sin ganar nada.
+    `increase` mantiene la proporcion cubriendo el destino, y `crop` centra.
+
+    The first `count` frames, already scaled and cropped. ffmpeg does the scale
+    and crop rather than PIL: it is 73 frames per clip and doing it in Python
+    makes phase 2 ten times slower for nothing.
+    """
+    ffmpeg = _ffbin("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(L("ffmpeg not found in PATH; it is needed to read video.",
+                             "No se encuentra ffmpeg en el PATH; hace falta para leer video."))
+
+    vf = "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}".format(
+        w=int(width), h=int(height))
+    proc = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(path), "-vf", vf,
+         "-frames:v", str(int(count)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, timeout=600,
+    )
+    if proc.returncode != 0:
+        detalle = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("ffmpeg: {}".format(detalle[-1] if detalle else "exit {}".format(proc.returncode)))
+
+    esperado = int(count) * int(height) * int(width) * 3
+    if len(proc.stdout) != esperado:
+        raise RuntimeError(L("ffmpeg returned {} bytes, {} expected ({} frames of {}x{})",
+                             "ffmpeg devolvio {} bytes, se esperaban {} ({} fotogramas de {}x{})")
+                           .format(len(proc.stdout), esperado, count, width, height))
+
+    arr = np.frombuffer(proc.stdout, dtype=np.uint8).reshape(int(count), int(height), int(width), 3)
+    return torch.from_numpy(arr.copy())          # [T,H,W,3] uint8
+
+
 def encode_video_latent(vae, image):
     """One still image = one video frame (T=1) / Una imagen fija = un frame de video (T=1)."""
     vae_dtype = next(vae.parameters()).dtype
@@ -2286,6 +2476,29 @@ def encode_video_latent(vae, image):
     image_tensor = image_tensor.unsqueeze(0).to("cuda", dtype=vae_dtype)
     with torch.inference_mode():
         latent = vae.encode(image_tensor)   # [B,24,1,H/16,W/16]
+    return latent.detach().to(torch.bfloat16).cpu().contiguous()
+
+
+def encode_clip_latent(vae, frames_uint8):
+    """Clip [T,H,W,3] uint8 -> latente [1,24,T',H/16,W/16].
+
+    Misma normalizacion que la imagen ([-1,1]); el VAE convierte a [0,1] e
+    ImageNet por dentro. Se manda a CUDA de una vez: son 73x576x576x3 bytes,
+    unos 73 MB en uint8, y trocear la copia no ahorraria nada porque el pico
+    esta en las activaciones del encoder, que ya van trozo a trozo.
+
+    Same normalization as the still image; the VAE converts to [0,1] and
+    ImageNet internally. Sent to CUDA in one go: ~73 MB in uint8, and splitting
+    the copy would save nothing because the peak is in the encoder activations,
+    which are already chunked.
+    """
+    vae_dtype = next(vae.parameters()).dtype
+    x = frames_uint8.permute(3, 0, 1, 2).unsqueeze(0)          # [1,3,T,H,W]
+    x = x.to("cuda", dtype=torch.float32).div_(127.5).sub_(1.0).to(vae_dtype)
+    with torch.inference_mode():
+        latent = vae.encode(x)
+    del x
+    torch.cuda.empty_cache()
     return latent.detach().to(torch.bfloat16).cpu().contiguous()
 
 
@@ -2417,7 +2630,7 @@ def preprocess_minimaxh3():
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     images = sorted(f for f in os.listdir(DATASET_PATH)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))
+                    if f.lower().endswith(IMAGE_EXTS + VIDEO_EXTS))
     if not images:
         raise RuntimeError(L("No images in {}", "No hay imagenes en {}").format(DATASET_PATH))
 
@@ -2652,19 +2865,47 @@ def preprocess_minimaxh3():
         log_dev("  [{}/{}] {}".format(idx, len(images), filename))
         t0 = time.time()
 
-        image = Image.open(os.path.join(DATASET_PATH, filename)).convert("RGB")
-        bw, bh = bucket_size(image.width, image.height)
-        scale = max(bw / image.width, bh / image.height)
-        image = image.resize((math.ceil(image.width * scale), math.ceil(image.height * scale)),
-                             Image.LANCZOS)
-        left = (image.width - bw) // 2
-        top = (image.height - bh) // 2
-        image = image.crop((left, top, left + bw, top + bh))
+        ruta_media = os.path.join(DATASET_PATH, filename)
 
-        log_dev("    Bucket: {}x{}".format(bw, bh))
+        if is_video(filename):
+            info = probe_video(ruta_media)
+            if info is None:
+                raise RuntimeError(L("Could not read the clip: {}",
+                                     "No se pudo leer el clip: {}").format(filename))
+            total, vw, vh = info
+            keep = h3_valid_frames(total, NUM_FRAMES)
+            if keep is None:
+                raise RuntimeError(
+                    L("{} has {} frames; the minimum is {}.",
+                      "{} tiene {} fotogramas; el minimo son {}.")
+                    .format(filename, total, H3_BASE_FRAMES))
 
-        with torch.inference_mode():
-            video_latent = encode_video_latent(vae, image)
+            bw, bh = bucket_size(vw, vh)
+            log_dev("    Bucket: {}x{} | {} de {} fotogramas -> {} latentes".format(
+                bw, bh, keep, total, h3_latent_frames(keep)))
+            if keep < total:
+                log_dev(L("    Trimming {} -> {} frames (H3 needs 17n+5).",
+                          "    Recortando {} -> {} fotogramas (H3 exige 17n+5).")
+                        .format(total, keep))
+
+            frames_uint8 = read_video_frames(ruta_media, keep, bw, bh)
+            video_latent = encode_clip_latent(vae, frames_uint8)
+            del frames_uint8
+        else:
+            image = Image.open(ruta_media).convert("RGB")
+            bw, bh = bucket_size(image.width, image.height)
+            scale = max(bw / image.width, bh / image.height)
+            image = image.resize((math.ceil(image.width * scale), math.ceil(image.height * scale)),
+                                 Image.LANCZOS)
+            left = (image.width - bw) // 2
+            top = (image.height - bh) // 2
+            image = image.crop((left, top, left + bw, top + bh))
+
+            log_dev("    Bucket: {}x{}".format(bw, bh))
+
+            with torch.inference_mode():
+                video_latent = encode_video_latent(vae, image)
+
         torch.save(video_latent, video_path)
 
         lat = video_latent.float()
@@ -2708,6 +2949,16 @@ def preprocess_minimaxh3():
                 "video_latent": os.path.basename(video_path),
                 "audio_latent": os.path.basename(audio_path) if WRITE_AUDIO_LATENT else None,
                 "latent_shape": list(video_latent.shape),
+                # Fotogramas de PIXEL que se cachearon: 1 en una imagen, 17n+5 en
+                # un clip. El entrenador lo necesita para calcular las filas de
+                # audio, que dependen de la duracion y no del numero de latentes.
+                # PIXEL frames cached: 1 for an image, 17n+5 for a clip. The
+                # trainer needs it to size the audio rows, which depend on the
+                # duration and not on the latent count.
+                "num_frames": int(video_latent.shape[2] and
+                                  (h3_pixel_frames(video_latent.shape[2])
+                                   if video_latent.shape[2] > 1 else 1)),
+                "kind": "video" if is_video(filename) else "image",
                 "prompt_structure": prompt_structure,
             },
             os.path.join(CACHE_DIR, "{}_info.json".format(base)),
@@ -2760,9 +3011,24 @@ def preprocess_minimaxh3():
                          "o de latents_mean/std."))
 
     # ---------- cache info ----------
+    # Que hay realmente en la cache. Se cuenta en vez de suponerlo: un dataset
+    # puede ser mixto, y el entrenador necesita saber si va a encontrar latentes
+    # de 1 fotograma, de 17n+5, o de ambos.
+    # What the cache actually holds, counted rather than assumed: a dataset can
+    # be mixed, and the trainer needs to know whether it will find 1-frame
+    # latents, 17n+5 ones, or both.
+    _n_clips = sum(1 for f in images if is_video(f))
+    _n_imgs = len(images) - _n_clips
+    if _n_clips and _n_imgs:
+        _kind, _frames = "mixed", None
+    elif _n_clips:
+        _kind, _frames = "video", NUM_FRAMES
+    else:
+        _kind, _frames = "image", 1
+
     cache_info = {
         "format": "MiniMaxH3-LoRA-Precache",
-        "version": 3,
+        "version": CACHE_FORMAT_VERSION,
         "model_id": MODEL_ID,
         "nf4_model_id": NF4_MODEL_ID,
         "dataset_path": DATASET_PATH,
@@ -2770,16 +3036,25 @@ def preprocess_minimaxh3():
         "target_area": TARGET_AREA,
         "multiple": MULTIPLE,
         "frame_rate": FRAME_RATE,
-        "num_frames": 1,
+        # num_frames = fotogramas de PIXEL por muestra. None en un dataset mixto:
+        # ahi no hay un solo valor y cada _info.json lleva el suyo.
+        # num_frames = PIXEL frames per sample. None on a mixed dataset, where
+        # there is no single value and each _info.json carries its own.
+        "num_frames": _frames,
+        "content": _kind,
+        "num_images": _n_imgs,
+        "num_clips": _n_clips,
         "max_sequence_length": MAX_SEQ_LEN,
         "trigger_word": TRIGGER_WORD,
         "audio_latent_channels": audio_channels,
         "text_encoder_hidden_layer": TEXT_ENCODER_HIDDEN_LAYER,
         "prompt_encoding": "Qwen3-VL raw layer-50 output, NO final norm, no special tokens",
         "rope_rebuilt_modules": DIAG["rope"].get("rebuilt_modules", []),
-        "note": ("Image dataset cache. Transformer NOT loaded. H3 reference Video VAE: 24 ch, "
-                 "T=1, H/16 x W/16. Audio latent is a zero placeholder - the trainer MUST give "
-                 "it zero loss weight or skip the audio stream entirely."),
+        "note": ("Transformer NOT loaded. H3 reference Video VAE: 24 ch, H/16 x W/16. "
+                 "Stills encode to T=1; clips encode in 17-frame chunks with 3 trailing "
+                 "latents dropped, so 17n+5 pixel frames give 5n+2 latent frames. Audio "
+                 "latent is a zero placeholder - the trainer MUST give it zero loss weight "
+                 "or skip the audio stream entirely."),
     }
     atomic_json(cache_info, os.path.join(CACHE_DIR, "cache_info.json"))
 

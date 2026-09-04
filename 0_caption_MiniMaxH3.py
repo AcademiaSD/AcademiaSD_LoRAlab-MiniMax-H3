@@ -122,12 +122,49 @@ DEFAULTS = {
     # only; this script never opens an image for writing.
     "max_image_side": 512,
 
+    # ---- clips de video ----
+    # Prompt aparte: para un clip lo que importa es el MOVIMIENTO. Con el prompt
+    # de imagen el modelo describe el primer fotograma y el LoRA aprende estilo
+    # pero no efecto, que es justo lo que se quiere entrenar.
+    # Separate prompt: for a clip what matters is the MOTION. With the image
+    # prompt the model describes the first frame, and the LoRA learns style but
+    # not the effect, which is the whole point.
+    # El limite de palabras va DENTRO del prompt, no solo en max_new_tokens.
+    # Sin el, el modelo escribe una descripcion larga del CONTENIDO y se queda
+    # sin presupuesto justo al llegar al efecto: los captions salian cortados a
+    # media frase ("...as the", "...The hands rotate the miniature tank") y esa
+    # frase rota es lo que aprenderia el LoRA.
+    #
+    # The word limit goes INSIDE the prompt, not just in max_new_tokens. Without
+    # it the model writes a long description of the CONTENT and runs out of
+    # budget right as it reaches the effect: captions came out cut mid-sentence,
+    # and that broken sentence is what the LoRA would learn.
+    "caption_video_prompt": (
+        "Describe this video clip in at most 40 words, as one short paragraph, "
+        "for training a text-to-video model. Focus on what CHANGES over time: "
+        "the transition, the transformation, and how the subject or the camera "
+        "moves. Name the subject in a few words, then spend the rest on the "
+        "effect. Do not describe details that stay the same. No preamble, no "
+        "lists, and do not mention that this is a video or a clip."
+    ),
+
+    # Fotogramas que se le pasan al captioner, repartidos por todo el clip. No
+    # hacen falta los 73: con 12 se ve perfectamente que ocurre, y el processor
+    # tiene un presupuesto de pixeles x fotogramas (25.165.824) que 73 fotogramas
+    # a 512x512 casi agotan antes de empezar.
+    # Frames handed to the captioner, spread across the clip. All 73 are not
+    # needed: 12 show what happens, and the processor has a pixels x frames
+    # budget (25,165,824) that 73 frames at 512x512 nearly exhaust.
+    "caption_video_frames": 12,
+
     # False = no toca las imagenes que ya tienen .txt con contenido.
     # False = leaves alone any image that already has a non-empty .txt.
     "overwrite": True,
 }
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
+MEDIA_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "caption_settings.json")
@@ -169,7 +206,11 @@ def read_json(path, default=None):
 def load_config():
     cfg = dict(DEFAULTS)
     precache = read_json(PRECACHE_CONFIG, {})
-    for key in ("dataset_path", "trigger_word"):
+    # num_frames viene de la pre-cache a proposito: decide QUE TROZO del clip se
+    # va a entrenar, y el caption tiene que describir ese trozo y no otro.
+    # num_frames comes from the pre-cache on purpose: it decides WHICH SLICE of
+    # the clip gets trained, and the caption must describe that slice.
+    for key in ("dataset_path", "trigger_word", "num_frames"):
         if precache.get(key):
             cfg[key] = precache[key]
     cfg.update({k: v for k, v in read_json(CONFIG_PATH, {}).items() if v != ""})
@@ -243,7 +284,7 @@ def ensure_captioner(cfg):
 def load_captioner(cfg):
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
-    directory = ensure_captioner(cfg)
+    directory = ensure_captioner(cfg)     # ya descargado en main(); aqui solo resuelve la ruta
     four_bit = bool(cfg["captioner_4bit"])
 
     log("=" * 78)
@@ -310,6 +351,220 @@ def shrink_for_captioner(image, max_side):
                         _Image.LANCZOS)
 
 
+def find_ffmpeg():
+    """ffmpeg del PATH. Es el unico decodificador disponible: el venv no trae
+    decord, av, cv2 ni imageio.
+    ffmpeg from PATH: the only decoder available, since the venv ships no
+    decord, av, cv2 or imageio."""
+    import shutil
+    return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+
+
+# Misma geometria que 1_pre_cache_MiniMaxH3.py: H3 solo admite 17n+5
+# fotogramas (5, 22, 39, 56, 73, 90, 107, 124, 141, 158...). Se repite aqui en
+# vez de importarla porque los dos scripts se lanzan por separado y no comparten
+# modulo; si alguna vez cambia, cambia en los dos sitios.
+# Same geometry as the pre-cache: H3 only accepts 17n+5 frames. Duplicated here
+# rather than imported because the two scripts run independently.
+H3_CLIP_LENGTH = 17
+H3_BASE_FRAMES = 5
+
+
+def h3_valid_frames(count, target=0):
+    """Fotogramas que la pre-cache usara de un clip de `count`.
+
+    Devuelve el mayor 17n+5 que cabe, o el que pida `target` si es menor.
+    Returns the largest 17n+5 that fits, or `target`'s if that is smaller.
+    """
+    if count < H3_BASE_FRAMES:
+        return 0
+    mayor = H3_CLIP_LENGTH * ((count - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+    if target and target >= H3_BASE_FRAMES:
+        objetivo = H3_CLIP_LENGTH * ((int(target) - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+        return min(objetivo, mayor)
+    return mayor
+
+
+def caption_window(path, cfg):
+    """Cuantos fotogramas del clip vera de verdad el entrenamiento.
+
+    La pre-cache lee los N PRIMEROS fotogramas, no el clip entero, asi que este
+    es el unico tramo sobre el que el caption puede decir la verdad.
+
+    How many of the clip's frames training will actually see. The pre-cache reads
+    the FIRST N frames, not the whole clip, so this is the only stretch the
+    caption can tell the truth about.
+    """
+    total = video_frame_count(path) or 0
+    return h3_valid_frames(total, cfg.get("num_frames", 0)) or total
+
+
+def extract_frames(path, count, max_side, window=0):
+    """Saca `count` fotogramas repartidos por el tramo entrenable del clip.
+
+    `window` limita el reparto a los `window` primeros fotogramas, que son los
+    que la pre-cache va a entrenar. Antes se repartian por el clip ENTERO, y esa
+    era una trampa silenciosa: con un clip de 161 fotogramas entrenado a 107, el
+    modelo de captioning veia el final de la transformacion y lo describia,
+    mientras que el entrenamiento se quedaba en el 66%. El resultado es que se le
+    ensena al modelo que el texto del estado final corresponde a los pixeles de
+    un estado intermedio, y al generar se planta ahi.
+
+    `window` limits the spread to the first `window` frames, the ones the
+    pre-cache will train on. They used to be spread across the WHOLE clip, which
+    was a silent trap: on a 161 frame clip trained at 107, the captioner saw the
+    end of the transformation and described it while training stopped at 66% --
+    teaching the model that the final state's text goes with an intermediate
+    state's pixels, so generation stalls there.
+
+    Se piden por posicion y no con `fps=`, porque un ritmo fijo depende de la
+    duracion y da un numero distinto de fotogramas en cada clip. Aqui hace falta
+    exactamente el mismo numero siempre.
+
+    Pulls `count` frames spread across the clip as PIL images. They are selected
+    by position rather than with `fps=`, because a fixed rate depends on the
+    duration and yields a different count per clip; here the count must be the
+    same every time.
+    """
+    import subprocess
+    import tempfile
+
+    from PIL import Image
+
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError(L("ffmpeg not found in PATH; it is needed to read video.",
+                             "No se encuentra ffmpeg en el PATH; hace falta para leer video."))
+
+    total = video_frame_count(path)
+    if not total:
+        raise RuntimeError(L("could not count the clip's frames",
+                             "no se pudo contar los fotogramas del clip"))
+
+    ultimo = int(window) if window and window > 0 else total
+    ultimo = max(1, min(ultimo, total))
+
+    count = max(1, min(int(count), ultimo))
+    wanted = [int(round(i * (ultimo - 1) / float(max(1, count - 1)))) for i in range(count)] \
+        if count > 1 else [0]
+    expr = "+".join("eq(n\\,{})".format(k) for k in sorted(set(wanted)))
+
+    escala = ""
+    if max_side and max_side > 0:
+        # -1 mantiene la proporcion; el 2 evita dimensiones impares.
+        # -1 keeps the aspect ratio; 2 avoids odd dimensions.
+        escala = ",scale='min({m},iw)':-2".format(m=int(max_side))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        patron = os.path.join(tmp, "f%04d.png")
+        subprocess.run(
+            [ffmpeg, "-v", "error", "-y", "-i", str(path),
+             "-vf", "select='{}'{}".format(expr, escala),
+             "-vsync", "0", "-frames:v", str(len(set(wanted))), patron],
+            capture_output=True, text=True, timeout=300, check=True,
+        )
+        salida = sorted(os.listdir(tmp))
+        if not salida:
+            raise RuntimeError(L("ffmpeg extracted no frames",
+                                 "ffmpeg no extrajo ningun fotograma"))
+        return [Image.open(os.path.join(tmp, f)).convert("RGB").copy() for f in salida]
+
+
+def video_duration(path):
+    """Duracion del clip en segundos, o None. / Clip duration in seconds."""
+    fps = video_fps(path)
+    frames = video_frame_count(path)
+    if fps and frames:
+        return frames / float(fps)
+    return None
+
+
+def video_fps(path):
+    """Fotogramas por segundo del clip, o None. / Clip frame rate, or None."""
+    import shutil
+    import subprocess
+
+    probe = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        num, _, den = out.partition("/")
+        return float(num) / float(den or 1)
+    except Exception:
+        return None
+
+
+def video_frame_count(path):
+    """Fotogramas reales del clip, contados. / Real frame count, counted."""
+    import shutil
+    import subprocess
+
+    probe = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if not probe:
+        return 0
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=120,
+        ).stdout.strip()
+        return int(out)
+    except Exception:
+        return 0
+
+
+def build_video_inputs(processor, frames, prompt, duration=None):
+    """Entrada para un clip: la lista de fotogramas va como UN video, no como
+    imagenes sueltas. Qwen3-VL trae un Qwen3VLVideoProcessor propio y su
+    plantilla emite <|vision_start|><|video_pad|><|vision_end|>; pasarlos como
+    imagenes produciria tokens distintos y el modelo los leeria sin relacion
+    temporal entre ellos.
+
+    Input for a clip: the frame list goes in as ONE video, not as separate
+    images. Qwen3-VL ships its own Qwen3VLVideoProcessor and its template emits
+    the video tokens; passing them as images would produce different tokens and
+    the model would read them with no temporal relation.
+    """
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "video", "video": frames},
+            {"type": "text", "text": prompt},
+        ],
+    }]
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True)
+
+    # Los metadatos describen LO QUE SE ENTREGA, no el clip original. Como aqui
+    # ya se han submuestreado los fotogramas, el "fps efectivo" es
+    # len(frames)/duracion: declarar los 73 del clip hace que el processor
+    # intente reindexar sobre una linea temporal que no tiene y reviente con un
+    # IndexError.
+    #
+    # Sin metadatos, transformers asume 24 fps y avisa. Con 12 fotogramas
+    # repartidos por 3 segundos, 24 fps es falso: creeria que el clip dura medio
+    # segundo y describiria mal el ritmo, que es justo lo que se le pregunta.
+    #
+    # The metadata describes WHAT IS HANDED IN, not the source clip. The frames
+    # are already subsampled here, so the effective fps is len(frames)/duration:
+    # declaring the clip's 73 makes the processor re-index over a timeline it
+    # does not have and blow up with an IndexError.
+    kwargs = {}
+    if duration and duration > 0:
+        kwargs["video_metadata"] = [{
+            "fps": len(frames) / float(duration),
+            "total_num_frames": len(frames),
+            "duration": float(duration),
+        }]
+
+    return processor(text=[text], videos=[frames], return_tensors="pt", **kwargs)
+
+
 def build_inputs(processor, image, prompt):
     """Construye la entrada con el chat template del modelo.
 
@@ -368,6 +623,27 @@ def caption_image(model, processor, image, cfg):
     return clean_caption(text)
 
 
+def caption_clip(model, processor, frames, cfg, duration=None):
+    """Igual que caption_image pero con la lista de fotogramas y el prompt de
+    movimiento. / Same as caption_image but with the frame list and the motion
+    prompt."""
+    inputs = build_video_inputs(processor, frames, cfg["caption_video_prompt"],
+                                duration=duration)
+    inputs = {k: (v.to("cuda") if hasattr(v, "to") else v) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=int(cfg["max_new_tokens"]),
+            do_sample=float(cfg["temperature"]) > 0,
+            temperature=max(float(cfg["temperature"]), 1e-4),
+        )
+
+    input_len = inputs["input_ids"].shape[1]
+    tokenizer = getattr(processor, "tokenizer", processor)
+    return clean_caption(tokenizer.decode(out[0][input_len:], skip_special_tokens=True))
+
+
 def compose(trigger, caption):
     """Trigger primero, siempre. / Trigger first, always."""
     trigger = (trigger or "").strip().rstrip(",")
@@ -385,6 +661,18 @@ def compose(trigger, caption):
 def main():
     cfg = load_config()
 
+    # El modelo PRIMERO, antes de mirar el dataset. Quien pulsa el boton espera
+    # que si falta se descargue; que el dataset este vacio es harina de otro
+    # costal y no debe impedir dejar la herramienta lista.
+    # The model FIRST, before looking at the dataset. Whoever presses the button
+    # expects a missing model to be downloaded; an empty dataset is a separate
+    # matter and must not stop the tool from being made ready.
+    try:
+        ensure_captioner(cfg)
+    except Exception as exc:
+        log(LF("[ERROR] {}", "[ERROR] {}", exc))
+        return 1
+
     dataset = cfg["dataset_path"]
     if not os.path.isdir(dataset):
         log(LF("[ERROR] Dataset folder not found: {}",
@@ -392,9 +680,10 @@ def main():
         return 1
 
     images = sorted(f for f in os.listdir(dataset)
-                    if f.lower().endswith(IMAGE_EXTS))
+                    if f.lower().endswith(MEDIA_EXTS))
     if not images:
-        log(LF("[ERROR] No images in {}", "[ERROR] No hay imagenes en {}", dataset))
+        log(LF("[ERROR] No images or clips in {}",
+               "[ERROR] No hay imagenes ni clips en {}", dataset))
         return 1
 
     overwrite = bool(cfg["overwrite"])
@@ -411,8 +700,10 @@ def main():
 
     log("=" * 78)
     log("[CAPTION] Dataset : {}".format(os.path.abspath(dataset)))
-    log(LF("[CAPTION] Images  : {} total, {} to caption",
-           "[CAPTION] Imagenes: {} en total, {} por describir", len(images), len(pending)))
+    _clips = sum(1 for f in images if f.lower().endswith(VIDEO_EXTS))
+    log(LF("[CAPTION] Files   : {} total ({} clips), {} to caption",
+           "[CAPTION] Ficheros: {} en total ({} clips), {} por describir",
+           len(images), _clips, len(pending)))
     log("[CAPTION] Trigger : {}".format(
         cfg["trigger_word"] or L("(none)", "(ninguno)")))
     log("[CAPTION] Mode    : {}".format(
@@ -443,10 +734,32 @@ def main():
         path = os.path.join(dataset, name)
         step_started = time.time()
         try:
-            with Image.open(path) as img:
-                image = shrink_for_captioner(img.convert("RGB"),
-                                             int(cfg["max_image_side"]))
-            caption = caption_image(model, processor, image, cfg)
+            if name.lower().endswith(VIDEO_EXTS):
+                ventana = caption_window(path, cfg)
+                total_clip = video_frame_count(path) or ventana
+                if ventana < total_clip:
+                    # Merece un aviso: significa que parte del clip no se
+                    # entrena, y es exactamente el final, donde suele estar el
+                    # remate del efecto. / Worth a warning: part of the clip is
+                    # not trained, and it is the end -- usually where the payoff
+                    # of the effect lives.
+                    log(LF("[!] {}: captioning the first {} of {} frames "
+                           "({:.0f}% of the clip), which is what pre-cache will "
+                           "train. The rest is NOT described.",
+                           "[!] {}: se hace caption de los {} primeros "
+                           "fotogramas de {} ({:.0f}% del clip), que es lo que "
+                           "entrenara la pre-cache. El resto NO se describe.",
+                           name, ventana, total_clip, 100.0 * ventana / total_clip))
+                fps = video_fps(path)
+                frames = extract_frames(path, cfg["caption_video_frames"],
+                                        int(cfg["max_image_side"]), ventana)
+                caption = caption_clip(model, processor, frames, cfg,
+                                       duration=(ventana / float(fps)) if fps else None)
+            else:
+                with Image.open(path) as img:
+                    image = shrink_for_captioner(img.convert("RGB"),
+                                                 int(cfg["max_image_side"]))
+                caption = caption_image(model, processor, image, cfg)
             if not caption:
                 raise RuntimeError(L("empty caption", "caption vacio"))
 

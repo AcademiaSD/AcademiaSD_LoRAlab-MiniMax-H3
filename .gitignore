@@ -1,0 +1,17 @@
+# Copias de seguridad que dejan las ediciones. No son parte del proyecto.
+# Backup copies left by edits. Not part of the project.
+*_bak*.py
+*_bak*.html
+*.bak
+
+# Todo lo que genera el usuario al usar la herramienta.
+# Everything the tool generates in use.
+venv/
+__pycache__/
+*.pyc
+MiniMax-H3*/
+Qwen*/
+cached_data_*/
+*_lora_output_*/
+*_settings*.json
+train_log.txt

@@ -136,6 +136,21 @@ def get_train_output_dir():
     return resolve_config_path(cfg.get("output_dir"), "MiniMaxH3_lora_output")
 
 
+# Extensiones del dataset. Se declaran una sola vez: antes cada endpoint tenia
+# su propia tupla y bastaba anadir un formato en uno para que los demas lo
+# rechazaran sin decir por que.
+# Dataset extensions, declared once. Each endpoint used to carry its own tuple,
+# so adding a format in one place made the others reject it silently.
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
+DATASET_EXTS = IMAGE_EXTS + VIDEO_EXTS
+
+
+def kind_of(path):
+    """'video' o 'image' segun la extension. / 'video' or 'image' by extension."""
+    return "video" if path.suffix.lower() in VIDEO_EXTS else "image"
+
+
 def get_dataset_dir():
     cfg = read_json_file(PRECACHE_CONFIG, {"dataset_path": "./dataset"})
     return resolve_config_path(cfg.get("dataset_path"), "./dataset")
@@ -521,15 +536,50 @@ def cache_info():
         except Exception:
             pass
 
-    # El bucket apunta a un area constante, asi que los tokens de video son
-    # area / (16 del VAE * 2 del patch)^2 = area / 1024, sea cual sea el aspecto.
-    # The bucket targets a constant area, so video tokens are area / 1024
-    # whatever the aspect ratio.
-    max_video = int(cached_area / 1024) if cached_area > 0 else 0
+    # LOS TOKENS SALEN DE latent_shape, NO DE UNA ESTIMACION.
+    #
+    # Antes se calculaba area/1024, que son los tokens de UN fotograma: valido
+    # cuando el proyecto solo entrenaba imagenes, y equivocado por un factor de
+    # 37 con un clip de 124. Peor aun en un dataset MIXTO, donde cache_info
+    # guarda num_frames=None porque no hay un solo valor, y cualquier formula
+    # basada en el area daria el numero de una imagen.
+    #
+    # Cada muestra guarda su latent_shape [B, C, T, H, W]; con el patch (1,2,2)
+    # de H3 los tokens son T x (H/2) x (W/2). Se toma el MAXIMO porque el pico de
+    # VRAM lo marca la muestra mas grande, no la media.
+    #
+    # Tokens come from latent_shape rather than an estimate. The old area/1024 is
+    # ONE frame's worth: right when the project only trained images, wrong by a
+    # factor of 37 on a 124 frame clip, and worse on a MIXED dataset where
+    # cache_info stores num_frames=None because there is no single value. Each
+    # sample records its latent_shape [B, C, T, H, W]; with H3's (1,2,2) patch the
+    # token count is T x (H/2) x (W/2). The MAXIMUM is taken because the VRAM peak
+    # is set by the largest sample, not the average.
+    max_video = 0
+    max_frames = 0
+    for f in cache_dir.glob("*_info.json"):
+        if f.name.startswith("_") or f.name == "cache_info.json":
+            continue
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            shape = d.get("latent_shape")
+            if shape and len(shape) >= 5:
+                max_video = max(max_video, int(shape[2]) * (int(shape[3]) // 2) * (int(shape[4]) // 2))
+            nf = int(d.get("num_frames", 0) or 0)
+            if nf > max_frames:
+                max_frames = nf
+        except Exception:
+            pass
+
+    # Sin latent_shape (caches antiguas) se vuelve a la estimacion, que al menos
+    # no es cero. / Without latent_shape (older caches) fall back to the estimate.
+    if max_video == 0 and cached_area > 0:
+        max_video = int(cached_area / 1024)
 
     if images:
         out.update({"available": True, "images": images,
                     "max_text_tokens": max_text, "max_video_tokens": max_video,
+                    "cached_num_frames": max_frames,
                     "cached_target_area": cached_area,
                     "form_target_area": int(cfg.get("target_area", 0) or 0)})
     return jsonify(out)
@@ -783,7 +833,7 @@ def dataset_info():
     images = []
     if dataset_dir.is_dir():
         for file_path in sorted(dataset_dir.iterdir()):
-            if file_path.is_file() and file_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+            if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS:
                 txt_path = file_path.with_suffix(".txt")
                 caption = ""
                 if txt_path.exists():
@@ -791,10 +841,16 @@ def dataset_info():
                         caption = txt_path.read_text(encoding="utf-8").strip()
                     except Exception:
                         pass
-                images.append({"file": file_path.name, "has_txt": txt_path.exists(), "caption": caption})
+                images.append({
+                    "file": file_path.name,
+                    "kind": kind_of(file_path),
+                    "has_txt": txt_path.exists(),
+                    "caption": caption,
+                })
     return jsonify({
         "path": str(dataset_dir),
         "image_count": len(images),
+        "video_count": sum(1 for it in images if it["kind"] == "video"),
         "caption_count": sum(1 for img in images if img["has_txt"]),
         "images": images[:500]
     })
@@ -808,9 +864,13 @@ def serve_dataset_image(filename):
         requested.relative_to(dataset_dir.resolve())
     except Exception:
         return "", 403
-    if not requested.is_file() or requested.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+    if not requested.is_file() or requested.suffix.lower() not in DATASET_EXTS:
         return "", 404
-    return send_from_directory(str(dataset_dir), requested.name)
+    # conditional=True activa las peticiones por rango (HTTP 206), que es lo que
+    # necesita <video> para poder buscar dentro del clip sin descargarlo entero.
+    # conditional=True enables range requests (HTTP 206), which <video> needs to
+    # seek inside the clip without downloading all of it.
+    return send_from_directory(str(dataset_dir), requested.name, conditional=True)
 
 
 @app.route("/api/save-caption", methods=["POST"])
@@ -838,7 +898,7 @@ def batch_caption():
         count = 0
         if trigger and dataset_dir.is_dir():
             for file_path in dataset_dir.iterdir():
-                if file_path.is_file() and file_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS:
                     txt_path = file_path.with_suffix(".txt")
                     text = ""
                     if txt_path.exists():
@@ -884,6 +944,294 @@ def _wipe_dir(path):
         except Exception as exc:
             errors.append("{}: {}".format(entry.name, exc))
     return removed, errors
+
+
+# Geometria temporal de MiniMax-H3, tomada del propio VAE (AutoencoderKLMiniMaxH3):
+#
+#   "The temporal geometry is fixed by clip_length (17 pixel frames per encoder
+#    chunk) and token_drop (3 trailing latent frames dropped per encode):
+#    17 * n + 5 pixel frames map to 5 * n + 2 latent frames."
+#
+# O sea que el numero de fotogramas NO es libre: tiene que ser 17n+5. Un clip de
+# 81 no vale (n saldria 4,47) y hay que recortarlo a 73. Las duraciones de audio
+# que admite el modelo son exactamente estas mismas cuentas a 24 fps, porque
+# audio y video comparten la rejilla dentro de la secuencia empaquetada.
+#
+# MiniMax-H3's temporal geometry, taken from the VAE itself: the frame count is
+# not free, it must be 17n+5. An 81-frame clip is invalid (n would be 4.47) and
+# has to be trimmed to 73. The audio durations the model accepts are these same
+# counts at 24 fps, because audio and video share the grid inside the packed
+# sequence.
+H3_FPS = 24.0
+H3_CLIP_LENGTH = 17
+H3_BASE_FRAMES = 5
+H3_SPATIAL_MULTIPLE = 32
+
+
+def h3_valid_frames(count, target=0):
+    """Fotogramas a conservar de un clip de `count`.
+
+    Con `target` se pide un numero concreto (el campo Frames de la pre-cache) y
+    se usa si el clip da para tanto; si no, se cae al mayor 17n+5 que quepa. Sin
+    `target`, el mayor posible.
+
+    Frames to keep from a clip of `count`. With `target` a specific count is
+    requested (the pre-cache's Frames field) and used if the clip is long
+    enough; otherwise it falls back to the largest 17n+5 that fits.
+    """
+    if count < H3_BASE_FRAMES:
+        return None
+    mayor = H3_CLIP_LENGTH * ((count - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+    if target and target >= H3_BASE_FRAMES:
+        # El objetivo tambien tiene que caer en la rejilla: si llega un valor
+        # raro se baja al 17n+5 inmediatamente inferior en vez de aceptarlo.
+        # The target must land on the grid too: an odd value is lowered to the
+        # nearest 17n+5 below rather than accepted.
+        objetivo = H3_CLIP_LENGTH * ((target - H3_BASE_FRAMES) // H3_CLIP_LENGTH) + H3_BASE_FRAMES
+        return min(objetivo, mayor)
+    return mayor
+
+
+def _ffbin(name):
+    """Localiza ffmpeg/ffprobe. / Locates ffmpeg/ffprobe."""
+    found = shutil.which(name) or shutil.which(name + ".exe")
+    return found
+
+
+def _video_info(path):
+    """(fps, frames, ancho, alto) del clip, o None si no se puede leer.
+
+    Se cuentan los fotogramas de verdad (-count_frames) en vez de fiarse de
+    nb_frames del contenedor, que en muchos mp4 viene vacio o mal.
+    Frames are actually counted instead of trusting the container's nb_frames,
+    which is often missing or wrong in mp4.
+    """
+    probe = _ffbin("ffprobe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=r_frame_rate,nb_read_frames,width,height",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=120,
+        ).stdout.strip()
+        w, h, rate, frames = out.split(",")
+        num, _, den = rate.partition("/")
+        return float(num) / float(den or 1), int(frames), int(w), int(h)
+    except Exception:
+        return None
+
+
+def _video_fps(path):
+    info = _video_info(path)
+    return info[0] if info else None
+
+
+def h3_nearest_frames(ideal):
+    """El 17n+5 mas cercano a `ideal`, nunca por debajo de 5.
+
+    Se redondea al mas cercano y no hacia abajo a proposito: hacia abajo se
+    pierde el final del clip, y en un clip de efecto el final es el remate. Un
+    2% de camara lenta no se nota; que la cara no termine de abrirse, si.
+
+    The nearest 17n+5 to `ideal`, never below 5. Rounded to nearest rather than
+    down on purpose: rounding down loses the end of the clip, and in an effect
+    clip the end is the payoff. A 2% slow-motion goes unnoticed; a face that
+    never finishes opening does not.
+    """
+    if ideal <= H3_BASE_FRAMES:
+        return H3_BASE_FRAMES
+    k = int(round((float(ideal) - H3_BASE_FRAMES) / H3_CLIP_LENGTH))
+    return max(H3_BASE_FRAMES, H3_CLIP_LENGTH * k + H3_BASE_FRAMES)
+
+
+@app.route("/api/prepare-clips", methods=["POST"])
+@app.route("/api/convert-fps", methods=["POST"])
+def convert_fps():
+    """Deja cada clip a `fps` exactos y con un recuento valido 17n+5.
+
+    LO QUE NO HACE, Y POR QUE.
+
+    No recorta por el final. Antes si: se quedaba con los `num_frames` primeros
+    fotogramas. Eso, sumado a que la pre-cache tambien lee los N primeros y a que
+    el captioner miraba el clip ENTERO, produjo el fallo que motivo esta
+    reescritura: un dataset de clips de 161 fotogramas entrenado a 107 aprendio
+    solo el 66% de la transformacion, mientras el caption describia el final que
+    los pixeles no contenian. El modelo se plantaba a mitad y volvia atras.
+    Recortar es trabajo de la pre-cache, que lo hace sin tocar el original;
+    hacerlo tambien aqui era destructivo y redundante.
+
+    No reetiqueta con -itsscale. Eso conserva los fotogramas pero cambia la
+    VELOCIDAD: 161 fotogramas a 32 fps reetiquetados a 24 pasan de 5,03 a 6,71
+    segundos, un 33% mas lentos. H3 razona a 24 fps, asi que ese clip le ensena
+    el efecto a camara lenta.
+
+    LO QUE SI HACE. Remuestrea a `fps` conservando la duracion real, y ajusta al
+    17n+5 mas cercano estirando o comprimiendo el tiempo lo justo. Para 161
+    fotogramas a 32 fps: 5,031 s x 24 = 120,75 fotogramas ideales -> el valido
+    mas cercano es 124 -> 5,167 s, un 2,7% mas lento. Ningun fotograma del
+    original se pierde y la velocidad practicamente no cambia.
+
+    El precio es una recodificacion (crf 16, casi sin perdida visual). El
+    original queda intacto en _originals.
+
+    Leaves every clip at exactly `fps` with a valid 17n+5 count. It no longer
+    trims to num_frames: that trimming, combined with the pre-cache also reading
+    the first N frames and the captioner looking at the WHOLE clip, is what
+    caused the failure behind this rewrite -- 161 frame clips trained at 107
+    learned only 66% of the transformation while the caption described an ending
+    the pixels did not contain, so generation stalled halfway and reversed.
+    Trimming is the pre-cache's job, non-destructively. It no longer uses
+    -itsscale either: that keeps the frames but changes the SPEED (161 frames at
+    32 fps relabelled to 24 go from 5.03 s to 6.71 s, 33% slower), and H3 reasons
+    at 24 fps, so such a clip teaches the effect in slow motion. Instead it
+    resamples to `fps` preserving real duration and lands on the nearest 17n+5 by
+    stretching time just enough. The cost is a re-encode (crf 16, visually
+    lossless); the original stays untouched in _originals.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        target = float(data.get("fps", 24.0))
+        # Ya NO se lee num_frames. El recuento lo fija la duracion real del
+        # clip, no el ajuste de entrenamiento: si alguien quiere entrenar con
+        # menos fotogramas, eso lo decide la pre-cache sobre una copia, no una
+        # tijera sobre el fichero de origen.
+        # num_frames is NOT read any more. The count is set by the clip's real
+        # duration, not by a training setting: training on fewer frames is the
+        # pre-cache's decision, made on a copy, not a cut to the source file.
+        if target <= 0:
+            return jsonify({"status": "error", "error": "fps must be > 0 / fps debe ser > 0"}), 400
+
+        if get_status().get("running"):
+            return jsonify({"status": "error",
+                            "error": "A process is running. Stop it first. / "
+                                     "Hay un proceso en marcha. Detenlo primero."}), 409
+
+        ffmpeg = _ffbin("ffmpeg")
+        if not ffmpeg or not _ffbin("ffprobe"):
+            return jsonify({"status": "error",
+                            "error": "ffmpeg/ffprobe not found in PATH. / "
+                                     "No se encuentran ffmpeg/ffprobe en el PATH."}), 400
+
+        dataset_dir = get_dataset_dir()
+        if not dataset_dir.is_dir():
+            return jsonify({"status": "error", "error": "No dataset folder / No hay dataset"}), 404
+
+        clips = sorted(f for f in dataset_dir.iterdir()
+                       if f.is_file() and f.suffix.lower() in VIDEO_EXTS)
+        if not clips:
+            return jsonify({"status": "ok", "converted": 0, "skipped": 0, "errors": [],
+                            "details": [], "warnings": [],
+                            "message": "No clips / No hay clips"})
+
+        # Los originales van a una subcarpeta. Ni el pre-cache ni el Dataset
+        # Manager recorren subdirectorios, asi que no se entrenaran dos veces.
+        # Originals go to a subfolder. Neither the pre-cache nor the Dataset
+        # Manager walks subdirectories, so nothing gets trained twice.
+        backup = dataset_dir / "_originals"
+        converted, skipped, errors, warnings = [], [], [], []
+
+        for clip in clips:
+            info = _video_info(clip)
+            if info is None:
+                errors.append("{}: could not read the clip / no se pudo leer el clip".format(clip.name))
+                continue
+            fps, frames, width, height = info
+
+            if frames < H3_BASE_FRAMES or fps <= 0:
+                errors.append("{}: only {} frames, the minimum is {} / solo {} fotogramas, "
+                              "el minimo son {}".format(clip.name, frames, H3_BASE_FRAMES,
+                                                        frames, H3_BASE_FRAMES))
+                continue
+
+            duracion = frames / float(fps)
+            keep = h3_nearest_frames(duracion * target)
+            duracion_nueva = keep / float(target)
+            # Cuanto hay que estirar (>1) o comprimir (<1) el tiempo para que la
+            # duracion caiga justo en `keep` fotogramas a `target` fps.
+            # How much time must stretch (>1) or compress (<1) so the duration
+            # lands exactly on `keep` frames at `target` fps.
+            estiramiento = duracion_nueva / duracion
+
+            desvio = abs(estiramiento - 1.0) * 100.0
+            if desvio >= 10.0:
+                warnings.append("{}: {:.2f}s does not sit near a valid count, so it becomes "
+                                "{:.2f}s ({:+.0f}% speed) / {:.2f}s no cae cerca de un recuento "
+                                "valido, asi que pasa a {:.2f}s ({:+.0f}% de velocidad)"
+                                .format(clip.name, duracion, duracion_nueva, -desvio,
+                                        duracion, duracion_nueva, -desvio))
+
+            # Las dimensiones NO se tocan: el pre-cache reescala al area objetivo
+            # respetando `multiple`, y recortar aqui perderia encuadre. Solo se avisa.
+            # Dimensions are NOT touched: the pre-cache rescales to the target area
+            # honouring `multiple`, and cropping here would lose framing. Warn only.
+            if width % H3_SPATIAL_MULTIPLE or height % H3_SPATIAL_MULTIPLE:
+                warnings.append("{}: {}x{} is not a multiple of {} (the pre-cache will "
+                                "rescale it) / no es multiplo de {} (el pre-cache lo "
+                                "reescalara)".format(clip.name, width, height,
+                                                     H3_SPATIAL_MULTIPLE, H3_SPATIAL_MULTIPLE))
+
+            necesita_fps = abs(fps - target) >= 0.05
+            necesita_recuento = keep != frames
+            if not necesita_fps and not necesita_recuento:
+                skipped.append("{} (already {:.0f} fps, {} frames, {:.2f}s: left untouched) / "
+                               "(ya a {:.0f} fps, {} fotogramas, {:.2f}s: no se toca)"
+                               .format(clip.name, fps, frames, duracion,
+                                       fps, frames, duracion))
+                continue
+
+            backup.mkdir(exist_ok=True)
+            tmp = backup / ("__converting__" + clip.name)
+            # setpts lleva la duracion a la que hace falta y fps remuestrea a la
+            # tasa exacta. El orden importa: fps tiene que ver ya los tiempos
+            # corregidos. -frames:v al final acota por si el redondeo interno de
+            # ffmpeg deja un fotograma de mas.
+            #
+            # setpts moves the duration to what is needed and fps resamples to
+            # the exact rate; order matters, fps must see the corrected
+            # timestamps. The trailing -frames:v guards against ffmpeg's internal
+            # rounding leaving one extra frame.
+            cmd = [ffmpeg, "-v", "error", "-y", "-i", str(clip),
+                   "-vf", "setpts=PTS*{:.10f},fps={:.6f}".format(estiramiento, target),
+                   "-frames:v", str(keep),
+                   "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+                   "-pix_fmt", "yuv420p", "-an", str(tmp)]
+
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=True)
+                shutil.move(str(clip), str(backup / clip.name))
+                shutil.move(str(tmp), str(clip))
+                cambios = []
+                if necesita_fps:
+                    cambios.append("{:.0f} -> {:.0f} fps".format(fps, target))
+                if necesita_recuento:
+                    cambios.append("{} -> {} frames".format(frames, keep))
+                cambios.append("{:.2f}s -> {:.2f}s".format(duracion, duracion_nueva))
+                converted.append("{} ({})".format(clip.name, ", ".join(cambios)))
+            except subprocess.CalledProcessError as exc:
+                # Sin el stderr de ffmpeg, un fallo aqui solo dice un codigo de
+                # salida y no hay forma de saber que paso.
+                # Without ffmpeg's stderr a failure here is just an exit code.
+                detalle = (exc.stderr or "").strip().splitlines()
+                errors.append("{}: ffmpeg: {}".format(
+                    clip.name, detalle[-1] if detalle else "exit {}".format(exc.returncode)))
+            except Exception as exc:
+                errors.append("{}: {}".format(clip.name, exc))
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except Exception:
+                    pass
+
+        return jsonify({"status": "ok" if not errors else "partial",
+                        "converted": len(converted), "skipped": len(skipped),
+                        "details": converted, "skipped_details": skipped,
+                        "errors": errors, "warnings": warnings,
+                        "backup": str(backup) if converted else None})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
 
 
 @app.route("/api/delete-project-data", methods=["POST"])

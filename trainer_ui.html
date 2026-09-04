@@ -68,6 +68,24 @@
         .form-group { margin-bottom: 9px; }
         .form-group label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; font-weight: 500; }
         .form-group input, .form-group select, .form-group textarea { width: 100%; background: #0f172a; border: 1px solid var(--panel-border); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; outline: none; }
+        /* La regla de arriba pone width:100% y padding a TODO input, incluidos los
+           checkbox: salian del tamano de un campo de texto, centrados, y empujaban
+           su etiqueta fuera del panel. Un checkbox necesita su tamano natural.
+           The rule above gives width:100% and padding to EVERY input, checkboxes
+           included: they came out the size of a text field, centred, pushing their
+           label outside the panel. A checkbox needs its natural size. */
+        .form-group input[type="checkbox"] { width: 16px; height: 16px; padding: 0;
+                                             margin: 0; flex: 0 0 auto; }
+        .chk-inline { display: inline-flex; align-items: center; gap: 7px;
+                      font-size: 0.8rem; color: var(--text-muted); font-weight: 500;
+                      cursor: pointer; padding: 0; white-space: nowrap;
+                      /* 35px = la altura exacta de un input de esta rejilla
+                         (8+8 de padding, 1+1 de borde, ~17 de linea). Igualarla
+                         alinea el cuadrito con el centro del campo de al lado.
+                         35px is exactly this grid's input height (8+8 padding,
+                         1+1 border, ~17 line), which lines the box up with the
+                         centre of the field beside it. */
+                      min-height: 35px; box-sizing: border-box; }
         .form-group input[readonly] { background: #1a2332; color: #94a3b8; cursor: not-allowed; border-style: dashed; }
         .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent); }
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -114,9 +132,26 @@
         .terminal-line.term-danger { color: #ef4444; font-weight: bold; }
 
         .ds-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+        .ds-prepare-bar { display: flex; align-items: center; gap: 10px;
+                           flex-wrap: wrap; margin: 10px 0 4px 0; }
+        .ds-step-hint { font-size: 0.74rem; color: var(--text-muted); }
         .ds-caption-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
                            padding: 8px 0 10px 0; border-bottom: 1px solid var(--panel-border); margin-bottom: 10px; }
         .ds-caption-bar .ds-search { min-width: 220px; }
+        /* El selector no debe crecer: el sitio es para el prompt.
+           The selector must not grow; the room belongs to the prompt. */
+        .ds-caption-kind { flex: 0 0 auto; background: #0f172a; color: #fff;
+                           border: 1px solid var(--panel-border); border-radius: 6px;
+                           padding: 6px 8px; font-size: 0.8rem; }
+        /* El prompt es un parrafo de 60-80 palabras, no un dato de una linea. En
+           un <input> solo se veia un trozo y habia que recorrerlo con el cursor
+           para releerlo entero, que es justo lo que hay que hacer al ajustarlo.
+           The prompt is a 60-80 word paragraph, not a one-line value. In an
+           <input> only a slice was visible and rereading it meant scrolling with
+           the caret -- exactly what you do need to do while tuning it. */
+        .ds-caption-prompt { flex: 1 1 100%; min-width: 260px; min-height: 76px;
+                             resize: vertical; line-height: 1.45;
+                             font-family: inherit; }
         .ds-inline-label { display: flex; align-items: center; gap: 5px; font-size: 0.74rem;
                            color: var(--text-muted); white-space: nowrap; cursor: pointer; }
         .ds-search { flex: 1; min-width: 150px; background: #0f172a; border: 1px solid var(--panel-border); color: #fff; padding: 6px 10px; border-radius: 6px; font-size: 0.8rem; }
@@ -124,6 +159,21 @@
         .ds-grid.compact { grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); }
         .ds-grid.large { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
         .ds-grid.hidden { display: none; }
+        /* Tirador para estirar la rejilla del dataset. Los 380 px de max-height
+           de arriba son el SUELO: se puede agrandar cuanto se quiera y volver a
+           comprimir hasta ahi, que es el tamano de siempre.
+           Handle for stretching the dataset grid. The 380px max-height above is
+           the FLOOR: it can grow as much as you like and shrink back to that,
+           which is the size it has always had. */
+        .ds-resizer { height: 11px; margin: 2px 0 -6px 0; cursor: ns-resize;
+                      display: flex; align-items: center; justify-content: center;
+                      border-radius: 4px; touch-action: none; }
+        .ds-resizer::before { content: ""; width: 46px; height: 3px; border-radius: 2px;
+                              background: var(--panel-border); transition: background .12s; }
+        .ds-resizer:hover::before, .ds-resizer.dragging::before { background: #38bdf8; }
+        /* Con la rejilla plegada el tirador no tiene nada que estirar.
+           With the grid folded the handle has nothing to stretch. */
+        .ds-grid.hidden + .ds-resizer { display: none; }
 
         .ds-card { background: #0f172a; border: 1px solid var(--panel-border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: pointer; transition: transform 0.15s, border-color 0.15s; }
         .ds-card:hover { transform: translateY(-2px); border-color: var(--accent); }
@@ -131,7 +181,33 @@
         .img-wrapper { position: relative; width: 100%; height: 115px; background: #020617; }
         .ds-grid.compact .img-wrapper { height: 75px; }
         .ds-grid.large .img-wrapper { height: 165px; }
-        .img-wrapper img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .img-wrapper img,
+        .img-wrapper video { width: 100%; height: 100%; object-fit: cover; display: block; }
+        /* Marco de pelicula para los clips: dos tiras con perforaciones a los
+           lados, como un fotograma de 35 mm. Sustituye a la etiqueta VIDEO, que
+           caia justo encima de la barra del nombre y lo tapaba.
+           Se dibuja con pseudo-elementos y un degradado repetido: sin markup
+           extra, sin imagenes y sin un solo byte de descarga.
+
+           Film frame for clips: two perforated strips at the sides, like 35 mm.
+           It replaces the VIDEO badge, which landed on top of the filename bar
+           and hid it. Drawn with pseudo-elements and a repeating gradient: no
+           extra markup, no images, nothing to download. */
+        .img-wrapper.is-video::before,
+        .img-wrapper.is-video::after {
+            content: ""; position: absolute; top: 0; bottom: 0; width: 9px;
+            z-index: 1; pointer-events: none;
+            background-color: rgba(2, 6, 23, 0.9);
+            background-image: repeating-linear-gradient(to bottom,
+                rgba(241, 245, 249, 0.92) 0 6px, transparent 6px 12px);
+            background-size: 5px 12px;
+            background-position: center top;
+            background-repeat: repeat-y;
+        }
+        .img-wrapper.is-video::before { left: 0; }
+        .img-wrapper.is-video::after  { right: 0; }
+        /* El nombre y la papelera por encima de las tiras. */
+        .img-filename-tag { z-index: 3; }
 
         .ds-del { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border: none;
                   border-radius: 5px; background: rgba(15,23,42,0.82); color: #fca5a5; font-size: 0.82rem;
@@ -272,6 +348,10 @@
                     <div class="form-group">
                         <label>Resolution (px²):</label>
                         <select id="target_area_select" onchange="syncResolution(this.value)">
+							<option value="36864">192 x 192 (36,864 px²)</option>
+							<option value="65536">256 x 256 (65,536 px²)</option>
+							<option value="102400">320 x 320 (102,400 px²)</option>
+							<option value="147456">384 x 384 (147,456 px²)</option>
 							<option value="200704">448 x 448 (200,704 px²)</option>
                             <option value="262144" selected>512 x 512 (262,144 px²)</option>
 							<option value="331776">576 x 576 (331,776 px²)</option>
@@ -287,7 +367,7 @@
                         </div>
                     </div>
 
-                    <div class="form-row">
+                    <div class="form-row-3">
                         <div class="form-group">
                             <label>Multiple:</label>
                             <select id="precache_multiple">
@@ -300,6 +380,26 @@
                         <div class="form-group">
                             <label>Max Seq Len:</label>
                             <input type="number" id="precache_max_seq_len" value="100">
+                        </div>
+                        <!-- FRAMES: solo valores 17n+5, que es la geometria del VAE de H3.
+                             Cualquier otro numero no se puede codificar sin inventarse
+                             fotogramas. Manda tanto sobre el recorte de Prepare clips como
+                             sobre lo que lee el pre-cache: un solo sitio donde decidirlo.
+                             FRAMES: only 17n+5 values, H3's VAE geometry. Any other count
+                             cannot be encoded without inventing frames. It drives both the
+                             Prepare clips trim and what the pre-cache reads. -->
+                        <div class="form-group">
+                            <label>Frames (clips):</label>
+                            <select id="precache_num_frames"
+                                    title="Frames per clip. Only 17n+5 is valid: that is H3's VAE geometry (17n+5 pixel frames map to 5n+2 latents). Longer clips cost quadratically more VRAM, because attention is O(n2). On 16 GB, 56 frames (2.3 s) is the confirmed figure; 73 and 90 are worth trying but not guaranteed. Images ignore this. / Fotogramas por clip. Solo vale 17n+5: es la geometria del VAE de H3. Los clips largos cuestan VRAM de forma cuadratica, porque la atencion es O(n2). En 16 GB, 56 fotogramas (2,3 s) es lo confirmado; 73 y 90 merecen probarse pero no estan garantizados. Las imagenes ignoran este campo.">
+                                <option value="22">22 &mdash; 0.9 s</option>
+                                <option value="39">39 &mdash; 1.6 s</option>
+                                <option value="56" selected>56 &mdash; 2.3 s (16 GB)</option>
+                                <option value="73">73 &mdash; 3.0 s</option>
+                                <option value="90">90 &mdash; 3.8 s (32 GB)</option>
+                                <option value="107">107 &mdash; 4.5 s</option>
+                                <option value="124">124 &mdash; 5.2 s</option>
+                            </select>
                         </div>
                     </div>
 
@@ -541,14 +641,27 @@
                         <div class="form-group">
                             <label>Block Swap Storage:</label>
                             <select id="train_park_mode" title="Where the blocks that do not fit in VRAM live. RAM is the default and the right choice for almost everyone. Disk parks them in a memory-mapped file instead: same speed, but the memory becomes evictable, so a machine short on RAM degrades rather than running out. In exchange it writes up to 16 GB at startup and needs that free space. / Donde viven los bloques que no caben en VRAM. RAM es lo predeterminado y lo adecuado para casi todo el mundo. Disk los aparca en un fichero mapeado en memoria: misma velocidad, pero esa memoria pasa a ser desalojable, asi que una maquina con poca RAM degrada en vez de quedarse sin memoria. A cambio escribe hasta 16 GB al arrancar y necesita ese espacio libre.">
-                                <option value="auto" selected>Auto &mdash; RAM + disco / RAM + disk</option>
+                                <option value="auto" selected>Auto (RAM + Disk)</option>
                                 <option value="ram">RAM</option>
                                 <option value="disk">Disk</option>
                             </select>
                         </div>
                         <div class="form-group">
+                            <label>Resident Blocks (0 = auto):</label>
+                            <input type="number" step="1" min="0" max="50" id="train_resident_blocks" value="0"
+                                   title="Blocks kept in VRAM out of 50. 0 lets the VRAM plan decide. The plan only counts WEIGHTS (base + N x block + overhead), and its 2.5 GB overhead was calibrated on 300-700 token image sequences. A video clip is 3,000+ tokens, the activations dominate, and the plan overshoots: it asks for 30 resident blocks and saturates the card. Set it by hand for video and lower it until the peak fits. Fewer blocks = less VRAM and slower. / Bloques que se quedan en VRAM de los 50. 0 deja decidir al plan de VRAM. El plan solo cuenta PESOS, y su overhead de 2,5 GB se calibro con secuencias de imagen de 300-700 tokens. Un clip son mas de 3.000, las activaciones mandan y el plan se pasa: pide 30 residentes y satura la tarjeta. Con video, ponlo a mano y bajalo hasta que el pico quepa. Menos bloques = menos VRAM y mas lento.">
+                        </div>
+                        <div class="form-group">
                             <label>RAM Limit (GB, 0 = off):</label>
                             <input type="number" step="1" min="0" id="train_ram_limit_gb" value="0" title="Only used in Auto mode. Ceiling for TOTAL system RAM, the figure you see in Task Manager. 0 = no limit, everything stays in RAM. Above 0, the blocks that would push the machine past it are parked in a memory-mapped file instead. / Solo se usa en modo Auto. Techo de la RAM TOTAL del sistema, la cifra que ves en el Administrador de tareas. 0 = sin limite, todo se queda en RAM. Por encima de 0, los bloques que pasarian de ese techo se aparcan en un fichero mapeado en memoria.">
+                        </div>
+                        <div class="form-group">
+                            <label>Sage Attention 2.2.0 (previews only):</label>
+                            <label class="chk-inline"
+                                   title="DOES NOTHING WHEN TRAINING, and the trainer says so in the log. SageAttention ships inference kernels with no backward pass: its output comes back with requires_grad=False, so the q/k/v LoRAs would receive zero gradient and the LoRA would train wrong without a single error message. Native attention is used instead, which is already memory-efficient. The setting is kept for previews, where there is no backward and Sage would be usable. / NO HACE NADA AL ENTRENAR, y el entrenador lo dice en el log. SageAttention son kernels de inferencia sin backward: su salida vuelve con requires_grad=False, asi que los LoRA de q/k/v se quedarian sin gradiente y el LoRA saldria mal sin un solo mensaje de error. Se usa la atencion nativa, que ya es eficiente en memoria. El ajuste se conserva para las previews, donde no hay backward y Sage si valdria.">
+                                <input type="checkbox" id="train_use_sage_attention">
+                                <span>Enable / Activar</span>
+                            </label>
                         </div>
                         <!-- DEBUG ON/OFF - OCULTO DE LA INTERFAZ CON display:none;
                              Se oculta para la beta publica: el modo debug llena la
@@ -666,6 +779,25 @@
                     </div>
                 </div>
 
+                <!-- Prepare clips va aqui, pegado encima de Create Captions, porque
+                     ese es el orden real: primero se dejan los clips a 24 fps y con un
+                     recuento valido, y DESPUES se describen. Al reves, los caption
+                     describen un clip que ya no existe. Estaba perdido entre los
+                     botones de utilidades (Compact / Normal / Expand / Refresh) y se
+                     saltaba sin querer; que se salte cuesta una corrida entera.
+                     Prepare clips sits here, directly above Create Captions, because
+                     that is the real order: first the clips are put at 24 fps with a
+                     valid frame count, THEN they are described. The other way round the
+                     captions describe a clip that no longer exists. It used to be lost
+                     among the view buttons and got skipped by accident, and skipping it
+                     costs a whole training run. -->
+                <div class="ds-prepare-bar">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-fps" onclick="convertFps()"
+                            title="Leaves every clip at exactly 24 fps with a valid 17n+5 frame count (5, 22, 39, 56, 73, 90, 107, 124, 141, 158), WITHOUT cutting anything off the end: the whole clip is kept and time is stretched or squeezed by the couple of percent needed to land on a valid count. That matters because the payoff of an effect lives in the last frames, and if training never sees them the model learns a transformation that stops halfway. Re-encodes at crf 16 (visually lossless); originals are moved to _originals, which the pre-cache ignores. / Deja cada clip a 24 fps exactos y con un recuento valido 17n+5 (5, 22, 39, 56, 73, 90, 107, 124, 141, 158), SIN recortar nada por el final: se conserva el clip entero y se estira o comprime el tiempo el dos por ciento que haga falta para caer en un recuento valido. Importa porque el remate de un efecto esta en los ultimos fotogramas, y si el entrenamiento no los ve, el modelo aprende una transformacion que se queda a medias. Recodifica a crf 16 (sin perdida visible); los originales van a _originals, que la pre-cache ignora.">Prepare clips</button>
+                    <span class="ds-step-hint">Step 1 &mdash; run this before captioning /
+                        Paso 1 &mdash; hazlo antes de los captions</span>
+                </div>
+
                 <!-- Auto-captioning: usa el mismo Qwen3-VL que ya trae el repo NF4,
                      asi que no descarga ningun modelo extra. Ver 0_caption_MiniMaxH3.py.
                      Auto-captioning reuses the Qwen3-VL already inside the NF4 repo,
@@ -675,17 +807,41 @@
                             title="Writes one .txt per image with Qwen3-VL-4B, putting the trigger word first. The model downloads itself the first time (~8 GB) and then loads in 4-bit, about 3 GB of VRAM, so it fits on any card from 6 GB up. It is a one-off pass over the dataset. / Escribe un .txt por imagen con Qwen3-VL-4B, poniendo la palabra trigger al principio. El modelo se descarga solo la primera vez (~8 GB) y luego carga en 4 bits, unos 3 GB de VRAM, asi que entra en cualquier tarjeta desde 6 GB. Es una pasada unica sobre el dataset.">
                         <span id="btn-caption-label">Create Captions / Crear Captions</span>
                     </button>
-                    <input type="text" class="ds-search" id="caption_prompt"
-                           value="Describe this image for training a text-to-video model. One single paragraph, plain prose, no lists and no preamble. Cover: the subject and what they are doing, hair and clothing, the framing and camera angle, the setting, and the lighting. Do not invent a name and do not mention that this is an image or a photo."
-                           placeholder="Prompt for the captioner / Prompt para el generador"
-                           title="What the model is asked about each image. The default aims for one plain paragraph covering subject, clothing, framing, setting and lighting. The trigger word is added separately, at the front. / Lo que se le pide al modelo sobre cada imagen. El de por defecto busca un parrafo llano con sujeto, ropa, encuadre, escenario e iluminacion. La palabra trigger se anade aparte, al principio.">
+                    <span class="ds-step-hint">Step 2 / Paso 2</span>
+                    <!-- Un prompt por tipo de contenido, elegido con el selector.
+                         Antes eran dos campos de texto uno al lado del otro y el de
+                         clips se mostraba u ocultaba segun el dataset; con audio y
+                         video+audio a la vista serian cuatro campos peleandose por la
+                         misma barra. Con el selector solo se ve el que se esta
+                         editando, y los cuatro se guardan igual.
+                         One prompt per content type, picked with the selector. This
+                         used to be two side-by-side fields with the clip one shown or
+                         hidden by dataset content; with audio and video+audio coming
+                         that would be four fields fighting over one bar. The selector
+                         shows only the one being edited, and all four are saved. -->
+                    <select class="ds-caption-kind" id="caption_prompt_kind"
+                            onchange="switchCaptionPrompt()"
+                            title="Which prompt you are editing. Each content type needs a different one: an image is described by what it LOOKS like, a clip by what CHANGES over time, and audio by how it SOUNDS. The captioner picks the right one per file, so the prompt for a type you do not have simply sits unused. / Que prompt estas editando. Cada tipo pide uno distinto: una imagen se describe por su ASPECTO, un clip por lo que CAMBIA con el tiempo, y el audio por como SUENA. El generador elige el que toca en cada fichero, asi que el prompt de un tipo que no tengas se queda sin usar.">
+                        <option value="image">Image</option>
+                        <option value="video">Video</option>
+                        <option value="audio">Audio (soon)</option>
+                        <option value="video_audio">Video + Audio (soon)</option>
+                    </select>
+                    <textarea class="ds-search ds-caption-prompt" id="caption_prompt_text" rows="4"
+                              placeholder="Prompt for the captioner / Prompt para el generador"></textarea>
                     <label class="ds-inline-label" title="Off = only images with no caption are processed. / Desactivado = solo se procesan las imagenes sin caption.">
                         <input type="checkbox" id="caption_overwrite" checked>
                         Overwrite / Rehacer
                     </label>
                 </div>
 
-                <div class="ds-grid" id="ds-grid"></div>
+                <!-- Arranca en modo Grande: con clips de video, una miniatura de 75 px no
+                     deja juzgar el movimiento, que es lo que se viene a mirar.
+                     Starts in Large: with video clips a 75 px thumbnail is too small to
+                     judge the motion, which is the reason to look at all. -->
+                <div class="ds-grid large" id="ds-grid"></div>
+                <div class="ds-resizer" id="ds-resizer"
+                     title="Drag to make the dataset grid taller or shorter. Double-click to go back to the default height. / Arrastra para hacer la rejilla del dataset mas alta o mas baja. Doble clic para volver a la altura por defecto."></div>
             </div>
 
             <!-- Previews -->
@@ -704,6 +860,10 @@
                 <span style="font-size:0.8rem; color:var(--text-muted);">Click outside or button to close</span>
             </div>
             <img id="modal-img" src="" alt="Dataset Image">
+            <!-- Mismo hueco que la imagen: solo uno de los dos se muestra.
+                 Same slot as the image: only one of the two is visible. -->
+            <video id="modal-vid" src="" controls autoplay loop playsinline
+                   style="display:none; max-width:100%; max-height:60vh; border-radius:8px;"></video>
             <div class="form-group">
                 <label>Caption Text (.txt):</label>
                 <textarea id="modal-txt"></textarea>
@@ -859,6 +1019,28 @@
             checkCheckpointInfo();
         }
 
+        // Pone el desplegable en `area` si esa area es una de sus opciones, y en
+        // Custom si no. Antes esto era una lista blanca escrita a mano
+        // (['262144','589824','1048576']) repetida en dos sitios: al anadir 448 y
+        // 576 al desplegable nadie actualizo las listas, asi que esas dos
+        // resoluciones se cargaban como "Custom" aunque estuvieran en el menu.
+        // Preguntarle al <select> por sus propias opciones no se puede
+        // desincronizar.
+        //
+        // Sets the dropdown to `area` if that area is one of its options, else to
+        // Custom. This used to be a hand-written whitelist duplicated in two
+        // places; when 448 and 576 were added to the dropdown nobody updated the
+        // lists, so those two loaded as "Custom" despite being in the menu.
+        // Asking the <select> about its own options cannot fall out of sync.
+        function applyResolution(area) {
+            const sel = document.getElementById('target_area_select');
+            const input = document.getElementById('precache_target_area');
+            input.value = area;
+            const conocida = Array.from(sel.options).some(o => o.value === String(area));
+            sel.value = conocida ? String(area) : 'custom';
+            input.style.display = conocida ? 'none' : 'block';
+        }
+
         function syncResolution(val) {
             const customInput = document.getElementById('precache_target_area');
             if (val === 'custom') {
@@ -938,8 +1120,34 @@
         const VRAM_MODEL = {
             BLOCK_GIB:  0.310320,  // un bloque residente del DiT
             BASE_GIB:   1.919,     // modulos fuera de bloques
-            NW_CONST:   3.4905,    // no-pesos: parte que no depende de la secuencia
-            NW_PER_TOK: 0.002317,  // no-pesos: por token de secuencia
+            // Los no-pesos se calibraron con IMAGENES y ahi siguen siendo validos.
+            // Con video son otros: medidos ocho picos reales (2-25 bloques, 1.332 y
+            // 2.048 tokens) sale pico = 3,419 + 0,002484 x tok + 0,3542 x N, con
+            // 0,24 GiB de error maximo. Aplicar la recta de imagen al video se pasa
+            // 2 GB de largo -- decia que 192x192/124f no cabe en 8 GB cuando cabe
+            // (medido: 7,3 GiB con 2 bloques) -- y aplicar la de video a las
+            // imagenes seria extrapolar 1.000 tokens hacia abajo sin una sola
+            // medida. Cada una en su terreno.
+            //
+            // The non-weight terms were calibrated on IMAGES and still hold there.
+            // Video is different: eight real peaks give a 0.24 GiB worst-case fit.
+            // Using the image line for video overshoots by 2 GB -- it claimed
+            // 192x192/124f does not fit in 8 GB when it does (measured 7.3 GiB with
+            // 2 blocks) -- and using the video line for images would extrapolate a
+            // thousand tokens downwards with no measurement behind it.
+            NW_CONST:   3.4905,    // no-pesos IMAGEN: parte fija / image, constant part
+            NW_PER_TOK: 0.002317,  // no-pesos IMAGEN: por token / image, per token
+            // Identicas a las de 2_train_lora_MiniMaxH3.py (ACT_BASE_GB /
+            // ACT_PER_TOKEN_GB). Si se tocan aqui, hay que tocarlas alli.
+            // Identical to the trainer's ACT_BASE_GB / ACT_PER_TOKEN_GB. Change one,
+            // change the other.
+            ACT_BASE_GB: 0.377,
+            ACT_PER_TOKEN_GB: 0.002340,
+            NW_CONST_V: 1.345,     // no-pesos VIDEO / video, constant part
+            NW_PER_TOK_V: 0.002340,// no-pesos VIDEO: por token / video, per token
+            BLOCK_GIB_V: 0.3542,   // bloque residente en video: pesa 0,3332 mas el
+                                   // workspace de dequantizacion / resident block in
+                                   // video: 0.3332 of weights plus dequant workspace
             SLACK_GIB:  0.50,      // aire bajo el TOTAL de la tarjeta; por debajo de
                                    // ~0,3 empiezan los reintentos y la memoria compartida
             BLOCK_GB:   0.333205,  // el mismo bloque en GB decimales, para el budget
@@ -974,9 +1182,36 @@
                 stale = !!(vramCacheInfo.cached_target_area &&
                            vramCacheInfo.cached_target_area !== formArea);
             }
-            const videoTokens = Math.round(area / 1024);
+            // Un token cubre 32x32 pixeles REALES, asi que area/1024 son los
+            // tokens de UN fotograma. Faltaba multiplicar por los fotogramas
+            // latentes: con 124 de pixel son 37 latentes, o sea 37 veces mas
+            // secuencia de la que este calculo suponia. De ahi que los perfiles
+            // dieran presupuestos de imagen para datasets de video.
+            //
+            // A token covers 32x32 REAL pixels, so area/1024 is ONE frame's worth.
+            // The multiplication by latent frames was missing: 124 pixel frames are
+            // 37 latents, i.e. 37x the sequence this assumed. That is why the
+            // profiles handed out image-sized budgets for video datasets.
+            let pixFrames = parseInt(document.getElementById('precache_num_frames').value) || 1;
+            if (vramCacheInfo && vramCacheInfo.available && vramCacheInfo.cached_num_frames > 0) {
+                pixFrames = vramCacheInfo.cached_num_frames;
+            }
+            // Geometria 17n+5 de H3: 5 latentes por cada 17 de pixel, mas 2.
+            const latentFrames = pixFrames > 1 ? 5 * Math.floor((pixFrames - 5) / 17) + 2 : 1;
+            // Si la cache los tiene contados, mandan: el servidor los saca del
+            // latent_shape de cada muestra y devuelve el MAXIMO, que es exacto y
+            // ademas resuelve el caso mixto, donde no existe un num_frames unico.
+            // La estimacion de abajo solo actua sin cache.
+            // When the cache has them counted they win: the server derives them from
+            // each sample's latent_shape and returns the MAXIMUM -- exact, and it
+            // also settles the mixed case, where no single num_frames exists. The
+            // estimate below only applies with no cache.
+            let videoTokens = Math.round(area / 1024) * Math.max(1, latentFrames);
+            if (vramCacheInfo && vramCacheInfo.available && vramCacheInfo.max_video_tokens > 0) {
+                videoTokens = vramCacheInfo.max_video_tokens;
+            }
             return { total: textTokens + videoTokens + 4, textTokens, videoTokens,
-                     area, formArea, source, stale };
+                     latentFrames, pixFrames, area, formArea, source, stale };
         }
 
         // Devuelve los tres valores para una tarjeta de `targetGb`.
@@ -991,14 +1226,31 @@
         function vramComputeFor(targetGiB) {
             const M = VRAM_MODEL;
             const seq = vramSequenceTokens();
-            const nonWeights = M.NW_CONST + M.NW_PER_TOK * seq.total;      // GiB
+            const esVideo = seq.latentFrames > 1;
+            const nwConst  = esVideo ? M.NW_CONST_V   : M.NW_CONST;
+            const nwPerTok = esVideo ? M.NW_PER_TOK_V : M.NW_PER_TOK;
+            const blockGiB = esVideo ? M.BLOCK_GIB_V  : M.BLOCK_GIB;
+            const nonWeights = nwConst + nwPerTok * seq.total;             // GiB
             const room = targetGiB - M.SLACK_GIB - nonWeights - M.BASE_GIB;
-            let blocks = Math.floor(room / M.BLOCK_GIB);
+            let blocks = Math.floor(room / blockGiB);
             blocks = Math.max(0, Math.min(M.MAX_BLOCKS, blocks));
-            const peak = M.BASE_GIB + blocks * M.BLOCK_GIB + nonWeights;   // GiB
-            // El budget que espera el entrenador va en GB decimales.
-            // The budget the trainer expects is in decimal GB.
-            const budget = Math.round((M.BASE_GB + blocks * M.BLOCK_GB + M.OVERHEAD) * 100) / 100;
+            const peak = M.BASE_GIB + blocks * blockGiB + nonWeights;      // GiB
+            // El budget que espera el entrenador va en GB decimales, y lleva DENTRO
+            // el overhead de entrenamiento, porque el trainer hace
+            // max_base_alloc = budget - overhead antes de repartir. Si aqui se suma
+            // el 2,5 fijo mientras alla se resta el calibrado (3,84 con 1.332
+            // tokens), la UI planea 24 bloques y el trainer entrega 20: la
+            // diferencia se la come el overhead que la UI no contó.
+            //
+            // The budget carries the training overhead INSIDE it, because the
+            // trainer does max_base_alloc = budget - overhead before handing out
+            // blocks. Adding the fixed 2.5 here while the trainer subtracts the
+            // calibrated value (3.84 at 1,332 tokens) makes the UI plan 24 blocks
+            // and the trainer deliver 20.
+            const overheadGb = esVideo
+                ? Math.max(M.OVERHEAD, M.ACT_BASE_GB + M.ACT_PER_TOKEN_GB * seq.videoTokens)
+                : M.OVERHEAD;
+            const budget = Math.round((M.BASE_GB + blocks * M.BLOCK_GB + overheadGb) * 100) / 100;
             const fits = blocks > 0 && (targetGiB - peak) > 0;
             return { blocks, budget, peak, usable: targetGiB, nonWeights, seq, fits,
                      swap: M.SWAP, headroom: M.HEADROOM };
@@ -1104,19 +1356,11 @@
                     if (p.project_name) document.getElementById('project_name').value = p.project_name;
                     if (p.trigger_word) document.getElementById('trigger_word').value = p.trigger_word;
                     if (p.dataset_path) document.getElementById('dataset_path').value = p.dataset_path;
-                    if (p.target_area) {
-                        document.getElementById('precache_target_area').value = p.target_area;
-                        const sel = document.getElementById('target_area_select');
-                        if (['262144', '589824', '1048576'].includes(String(p.target_area))) {
-                            sel.value = String(p.target_area);
-                        } else {
-                            sel.value = 'custom';
-                            document.getElementById('precache_target_area').style.display = 'block';
-                        }
-                    }
+                    if (p.target_area) applyResolution(p.target_area);
                     if (p.multiple) document.getElementById('precache_multiple').value = p.multiple;
                     if (p.max_side) document.getElementById('precache_max_side').value = p.max_side;
                     if (p.max_seq_len) document.getElementById('precache_max_seq_len').value = p.max_seq_len;
+                    if (p.num_frames) document.getElementById('precache_num_frames').value = p.num_frames;
                 }
                 if (data.train) {
                     const t = data.train;
@@ -1141,6 +1385,8 @@
 
                     if (t.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = t.vram_budget_gb;
                     if (t.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = t.ram_limit_gb;
+                    if (t.use_sage_attention !== undefined) document.getElementById('train_use_sage_attention').checked = !!t.use_sage_attention;
+                    if (t.resident_blocks !== undefined) document.getElementById('train_resident_blocks').value = t.resident_blocks;
                     if (t.park_mode !== undefined) document.getElementById('train_park_mode').value = t.park_mode;
                     if (t.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = t.vram_swap_gb;
                     if (t.vram_headroom_gb !== undefined) document.getElementById('train_vram_headroom_gb').value = t.vram_headroom_gb;
@@ -1166,6 +1412,34 @@
         }
         loadSettings();
 
+        // Al recargar la pagina se pierde la conexion SSE que alimenta la consola,
+        // pero el proceso NO muere: sigue entrenando. El problema era que la UI no
+        // volvia a preguntar, asi que dejaba Stop desactivado y no habia forma
+        // segura de parar un entrenamiento en marcha. Recargar durante una hora de
+        // entrenamiento significaba perder el control de el.
+        //
+        // Reloading drops the SSE connection that feeds the console, but the
+        // process does NOT die: it keeps training. The UI never asked again, so it
+        // left Stop disabled and there was no safe way to stop a running job.
+        // Reloading during an hour-long run meant losing control of it.
+        async function restoreRunningState() {
+            try {
+                const st = await (await fetch('/api/status')).json();
+                if (!st.running) return;
+                setRunningState(true);
+                appendTerminal(
+                    '\n[SYSTEM] A process is already running (' + st.script + ', PID ' + st.pid +
+                    '). The console was detached by the page reload, but the run continues and ' +
+                    'Stop works.\n' +
+                    '[SYSTEM] Hay un proceso en marcha (' + st.script + ', PID ' + st.pid +
+                    '). La consola se desconecto al recargar la pagina, pero el proceso sigue y ' +
+                    'Stop funciona.\n' +
+                    '[SYSTEM] Full output / Salida completa: train_log.txt',
+                    false, 'term-warning');
+            } catch (e) {}
+        }
+        restoreRunningState();
+
         function triggerLoadJson(target) {
             currentLoadTarget = target;
             document.getElementById('json_file_input').click();
@@ -1184,20 +1458,11 @@
                     if (data.trigger_word !== undefined) document.getElementById('trigger_word').value = data.trigger_word;
                     if (data.dataset_path !== undefined) document.getElementById('dataset_path').value = data.dataset_path;
                     
-                    if (data.target_area !== undefined) {
-                        document.getElementById('precache_target_area').value = data.target_area;
-                        const sel = document.getElementById('target_area_select');
-                        if (['262144', '589824', '1048576'].includes(String(data.target_area))) {
-                            sel.value = String(data.target_area);
-                            document.getElementById('precache_target_area').style.display = 'none';
-                        } else {
-                            sel.value = 'custom';
-                            document.getElementById('precache_target_area').style.display = 'block';
-                        }
-                    }
+                    if (data.target_area !== undefined) applyResolution(data.target_area);
                     if (data.multiple !== undefined) document.getElementById('precache_multiple').value = data.multiple;
                     if (data.max_side !== undefined) document.getElementById('precache_max_side').value = data.max_side;
                     if (data.max_seq_len !== undefined) document.getElementById('precache_max_seq_len').value = data.max_seq_len;
+                    if (data.num_frames !== undefined) document.getElementById('precache_num_frames').value = data.num_frames;
                     
                     if (data.total_steps !== undefined) document.getElementById('train_total_steps').value = data.total_steps;
                     if (data.lr !== undefined) document.getElementById('train_lr').value = data.lr;
@@ -1220,6 +1485,8 @@
 
                     if (data.vram_budget_gb !== undefined) document.getElementById('train_vram_budget_gb').value = data.vram_budget_gb;
                     if (data.ram_limit_gb !== undefined) document.getElementById('train_ram_limit_gb').value = data.ram_limit_gb;
+                    if (data.use_sage_attention !== undefined) document.getElementById('train_use_sage_attention').checked = !!data.use_sage_attention;
+                    if (data.resident_blocks !== undefined) document.getElementById('train_resident_blocks').value = data.resident_blocks;
                     if (data.park_mode !== undefined) document.getElementById('train_park_mode').value = data.park_mode;
                     if (data.vram_swap_gb !== undefined) document.getElementById('train_vram_swap_gb').value = data.vram_swap_gb;
                     if (data.vram_headroom_gb !== undefined) document.getElementById('train_vram_headroom_gb').value = data.vram_headroom_gb;
@@ -1289,6 +1556,7 @@
                 multiple: parseInt(document.getElementById('precache_multiple').value),
                 max_side: parseInt(document.getElementById('precache_max_side').value),
                 max_seq_len: parseInt(document.getElementById('precache_max_seq_len').value),
+                num_frames: parseInt(document.getElementById('precache_num_frames').value),
                 cache_dir: document.getElementById('precache_cache_dir').value,
                 preview_custom_prompt: document.getElementById('train_preview_custom_prompt').value.trim()
             };
@@ -1327,6 +1595,8 @@
 
                 vram_budget_gb: parseFloat(document.getElementById('train_vram_budget_gb').value),
                 ram_limit_gb: parseFloat(document.getElementById('train_ram_limit_gb').value) || 0,
+                use_sage_attention: document.getElementById('train_use_sage_attention').checked,
+                resident_blocks: parseInt(document.getElementById('train_resident_blocks').value) || 0,
                 park_mode: document.getElementById('train_park_mode').value,
                 vram_swap_gb: parseFloat(document.getElementById('train_vram_swap_gb').value),
                 vram_headroom_gb: parseFloat(document.getElementById('train_vram_headroom_gb').value),
@@ -1444,6 +1714,8 @@
                                                 successMsg = "\n[SYSTEM] ✓ Pre-Cache completed successfully! / ¡Pre-Caché finalizada con éxito!";
                                                 msgClass = 'term-success';
                                             }
+                                        } else if (scriptName === 'caption') {
+                                            successMsg = "\n[SYSTEM] ✓ Captions finished. / ¡Captions finalizados!";
                                         } else {
                                             successMsg = `\n[SYSTEM] ✓ Finished successfully with code / Finalizado con éxito con código: ${msg.code}`;
                                         }
@@ -1461,6 +1733,16 @@
                 appendTerminal(`\n[SYSTEM] Execution error / Error de ejecución: ${err}`, false, 'term-danger');
             } finally {
                 setRunningState(false);
+                // Los scripts que escriben en la carpeta del dataset dejan la
+                // galeria desfasada: los .txt nuevos no salen hasta refrescar.
+                // Se hace SIEMPRE, tambien si fallo a medias, porque un fallo
+                // parcial deja unos cuantos captions escritos y conviene verlos.
+                // Scripts that write into the dataset folder leave the gallery
+                // stale: new .txt files do not show until a refresh. Done ALWAYS,
+                // including on a partial failure, which still writes some.
+                if (scriptName === 'caption' || scriptName === 'precache') {
+                    try { loadDatasetInfo(); } catch (e) {}
+                }
                 loadPreviews();
                 checkCheckpointInfo();
             }
@@ -1478,13 +1760,125 @@
                 : 'Create Captions / Crear Captions';
         }
 
+        // ------------------------------------------------------------------
+        // PROMPTS DE CAPTION, UNO POR TIPO DE CONTENIDO.
+        //
+        // Los cuatro viven en memoria a la vez y solo se ve uno. Los nombres de
+        // las claves del JSON NO cambian respecto a lo que ya habia
+        // (caption_prompt y caption_video_prompt son los que lee
+        // 0_caption_MiniMaxH3.py), asi que esto no toca al generador. Las dos
+        // claves de audio se guardan y se recuperan, pero hoy no las lee nadie:
+        // estan aqui para que el dia que haya captioning de audio el prompt ya
+        // exista y no haya que rehacer la barra.
+        //
+        // All four live in memory at once and only one is visible. The JSON key
+        // names are unchanged (caption_prompt and caption_video_prompt are what
+        // 0_caption_MiniMaxH3.py reads), so this does not touch the captioner.
+        // The two audio keys are saved and restored but nothing reads them yet:
+        // they are here so that when audio captioning arrives the prompt already
+        // exists and this bar does not need rebuilding.
+        // ------------------------------------------------------------------
+        const CAPTION_PROMPT_KEY = {
+            image:       'caption_prompt',
+            video:       'caption_video_prompt',
+            audio:       'caption_audio_prompt',
+            video_audio: 'caption_video_audio_prompt'
+        };
+
+        const CAPTION_PROMPT_DEFAULTS = {
+            image: "Describe this image for training a text-to-video model. One single paragraph, plain prose, no lists and no preamble. Cover: the subject and what they are doing, hair and clothing, the framing and camera angle, the setting, and the lighting. Do not invent a name and do not mention that this is an image or a photo.",
+            video: "Describe this video clip in at most 40 words, as one short paragraph, for training a text-to-video model. Focus on what CHANGES over time: the transition, the transformation, and how the subject or the camera moves. Name the subject in a few words, then spend the rest on the effect. Do not describe details that stay the same. No preamble, no lists, and do not mention that this is a video or a clip.",
+            audio: "Describe this audio clip in at most 40 words, as one short paragraph, for training a text-to-audio model. Cover the kind of voice or sound, its timbre, the delivery and the pace, and the acoustic space. Do not transcribe the words. No preamble, no lists, and do not mention that this is a recording.",
+            video_audio: "Describe this clip in at most 60 words, as one short paragraph, for training a joint video and audio model. First what happens on screen and how it CHANGES over time, then what is heard: the voice or sound, its timbre and delivery. Do not transcribe the words. No preamble, no lists, and do not mention that this is a clip."
+        };
+
+        // El titulo del campo cambia con el tipo: lo que hay que vigilar en un
+        // prompt de imagen no es lo mismo que en uno de clip.
+        // The field's tooltip follows the type: what to watch for in an image
+        // prompt is not what to watch for in a clip prompt.
+        const CAPTION_PROMPT_TITLE = {
+            image: "What the model is asked about each image. The default aims for one plain paragraph covering subject, clothing, framing, setting and lighting. The trigger word is added separately, at the front. / Lo que se le pide al modelo sobre cada imagen. El de por defecto busca un parrafo llano con sujeto, ropa, encuadre, escenario e iluminacion. La palabra trigger se anade aparte, al principio.",
+            video: "What the model is asked about each CLIP. Different from the image prompt: for a clip what matters is what CHANGES over time, not what it looks like. Keep the word limit inside the prompt, or the model spends its budget describing content and the caption gets cut mid-sentence. / Lo que se le pide al modelo sobre cada CLIP. Distinto del de imagen: en un clip importa lo que CAMBIA con el tiempo, no el aspecto. Deja el limite de palabras dentro del prompt, o el modelo gasta el presupuesto describiendo contenido y el caption sale cortado a media frase.",
+            audio: "NOT USED YET: audio captioning is not implemented. The prompt is saved so it is ready when it is. It asks for timbre, delivery and acoustic space rather than a transcript, because the model is trained on how it sounds, not on the words. / AUN SIN USO: el captioning de audio no esta implementado. El prompt se guarda para que este listo cuando lo este. Pide timbre, entrega y espacio acustico en vez de una transcripcion, porque el modelo se entrena con como suena, no con las palabras.",
+            video_audio: "NOT USED YET: joint video plus audio captioning is not implemented. The prompt is saved so it is ready when it is. It puts the picture first and the sound second, which is the order the packed sequence uses. / AUN SIN USO: el captioning conjunto de video y audio no esta implementado. El prompt se guarda para que este listo cuando lo este. Pone primero la imagen y despues el sonido, que es el orden de la secuencia empaquetada."
+        };
+
+        let captionPrompts = Object.assign({}, CAPTION_PROMPT_DEFAULTS);
+        let captionPromptKind = 'image';
+        // Mientras nadie toque el selector, el tipo lo elige el dataset. En cuanto
+        // se toca, manda la persona: un refresco no debe robarle el campo que
+        // estaba editando. / Until the selector is touched the dataset picks the
+        // type; after that the person does, so a refresh cannot yank away the
+        // field they were editing.
+        let captionKindAuto = true;
+
+        // paintCaptionPrompt es el UNICO que escribe en el campo, y deja
+        // constancia de haberlo hecho. Sin esa marca, un stash disparado antes
+        // del primer pintado guardaria la cadena vacia encima del prompt por
+        // defecto y lo perderia: loadCaptionSettings solo restaura las claves que
+        // el servidor tenga guardadas, asi que en una instalacion nueva no habria
+        // nada que devolviera el texto. Las dos llegan por fetch, sin orden
+        // garantizado, asi que la carrera es real.
+        //
+        // paintCaptionPrompt is the ONLY writer to the field, and it records that
+        // it ran. Without that flag a stash fired before the first paint would
+        // save the empty string over the default prompt and lose it:
+        // loadCaptionSettings only restores keys the server actually has, so on a
+        // fresh install nothing would bring the text back. Both arrive by fetch
+        // in no guaranteed order, so the race is real.
+        let captionPromptPainted = false;
+
+        function paintCaptionPrompt() {
+            const campo = document.getElementById('caption_prompt_text');
+            if (!campo) return;
+            campo.value = captionPrompts[captionPromptKind] || '';
+            campo.title = CAPTION_PROMPT_TITLE[captionPromptKind] || '';
+            captionPromptPainted = true;
+        }
+
+        // Guarda lo escrito en el campo ANTES de cambiar de tipo o de enviar, o
+        // se perderia la edicion en curso. / Stash what is in the field BEFORE
+        // switching type or submitting, or the in-flight edit is lost.
+        function stashCaptionPrompt() {
+            const campo = document.getElementById('caption_prompt_text');
+            if (campo && captionPromptPainted) captionPrompts[captionPromptKind] = campo.value;
+        }
+
+        function switchCaptionPrompt() {
+            stashCaptionPrompt();
+            captionKindAuto = false;
+            captionPromptKind = document.getElementById('caption_prompt_kind').value;
+            paintCaptionPrompt();
+        }
+
+        // Lo llama loadDatasetInfo(), que se dispara desde catorce sitios:
+        // refrescar, borrar una imagen, terminar un caption, cambiar de proyecto.
+        // Repintar en cada uno de ellos borraria el prompt que se estuviera
+        // escribiendo, asi que si el tipo no cambia no se toca el campo.
+        //
+        // Called by loadDatasetInfo(), which fires from fourteen places: refresh,
+        // deleting an image, a caption run finishing, switching project.
+        // Repainting on every one of those would wipe a prompt being typed, so
+        // when the type does not change the field is left alone.
+        function setCaptionKind(kind) {
+            if (kind === captionPromptKind) return;
+            stashCaptionPrompt();
+            captionPromptKind = kind;
+            document.getElementById('caption_prompt_kind').value = kind;
+            paintCaptionPrompt();
+        }
+
         async function loadCaptionSettings() {
             try {
                 const res = await fetch('/api/caption-settings');
                 const data = await res.json();
-                if (data.caption_prompt) document.getElementById('caption_prompt').value = data.caption_prompt;
+                Object.keys(CAPTION_PROMPT_KEY).forEach(function (kind) {
+                    const guardado = data[CAPTION_PROMPT_KEY[kind]];
+                    if (guardado) captionPrompts[kind] = guardado;
+                });
                 if (data.overwrite !== undefined) document.getElementById('caption_overwrite').checked = !!data.overwrite;
             } catch (e) {}
+            paintCaptionPrompt();
         }
 
         async function runCaption() {
@@ -1495,12 +1889,20 @@
                              'Esto SOBRESCRIBIR\u00c1 los ' + captioned + ' caption(s) que ya existen.\n\n' +
                              'Continue? / \u00bfContinuar?')) return;
             }
-            const prompt = document.getElementById('caption_prompt').value.trim();
+            // Se mandan los CUATRO, no solo el visible: el dataset puede tener
+            // imagenes y clips a la vez y el generador necesita los dos prompts.
+            // All FOUR are sent, not just the visible one: a dataset can hold
+            // images and clips at once and the captioner needs both prompts.
+            stashCaptionPrompt();
+            const cuerpo = { overwrite: overwrite };
+            Object.keys(CAPTION_PROMPT_KEY).forEach(function (kind) {
+                cuerpo[CAPTION_PROMPT_KEY[kind]] = (captionPrompts[kind] || '').trim();
+            });
             try {
                 await fetch('/api/save-caption-settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ caption_prompt: prompt, overwrite: overwrite })
+                    body: JSON.stringify(cuerpo)
                 });
             } catch (e) { alert('Error: ' + e); return; }
             startScript('caption');
@@ -1569,12 +1971,25 @@
 
         async function loadDatasetInfo() {
             try {
-                const res = await fetch('/api/dataset-info');
+                // cache-busting: sin esto el navegador puede servir la respuesta
+                // anterior y el boton Refrescar no refresca nada.
+                // Without cache-busting the browser may serve the previous response
+                // and the Refresh button refreshes nothing.
+                const res = await fetch('/api/dataset-info?_=' + Date.now());
                 const data = await res.json();
                 allDatasetImages = data.images || [];
-                document.getElementById('ds-count').innerText = data.image_count;
+                document.getElementById('ds-count').innerText = data.video_count
+                    ? `${data.image_count} (${data.video_count} vid)`
+                    : data.image_count;
                 document.getElementById('ds-txt-count').innerText = data.caption_count;
                 updateCaptionButton(data.image_count, data.caption_count);
+                // Arrancar en el tipo que de verdad hay en el dataset ahorra un
+                // clic y, sobre todo, evita que alguien edite el prompt de imagen
+                // creyendo que es el que se va a usar con sus clips.
+                // Starting on the type the dataset actually holds saves a click
+                // and, more to the point, stops someone editing the image prompt
+                // believing it is the one their clips will use.
+                if (captionKindAuto) setCaptionKind(data.video_count ? 'video' : 'image');
                 renderDatasetGrid(allDatasetImages);
             } catch (e) {}
         }
@@ -1587,16 +2002,26 @@
                 card.className = 'ds-card';
                 card.onclick = (ev) => {
                     if (ev.target.closest('.ds-del')) return;
-                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '');
+                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '', esVideo);
                 };
                 
                 const hasCaption = img.has_txt && img.caption && img.caption.trim().length > 0;
                 const dotClass = hasCaption ? 'caption-dot dot-green' : 'caption-dot dot-red';
                 const dotTitle = hasCaption ? 'Caption OK / Texto existente' : 'No Caption / Sin texto';
 
+                // El fragmento #t=0.1 hace que el navegador pinte el frame de 0,1 s
+                // como poster. Sin el, muchos navegadores dejan el hueco en negro
+                // hasta que el video se reproduce.
+                // The #t=0.1 fragment makes the browser paint the frame at 0.1 s as a
+                // poster; without it many browsers leave the slot black until playback.
+                const esVideo = img.kind === 'video';
+                const medio = esVideo
+                    ? `<video src="/api/dataset-image/${img.file}#t=0.1" muted loop playsinline preload="metadata"></video>`
+                    : `<img src="/api/dataset-image/${img.file}" alt="${img.file}">`;
+
                 card.innerHTML = `
-                    <div class="img-wrapper">
-                        <img src="/api/dataset-image/${img.file}" alt="${img.file}">
+                    <div class="img-wrapper${esVideo ? ' is-video' : ''}">
+                        ${medio}
                         <button type="button" class="ds-del" title="Remove from dataset / Eliminar del dataset">&#128465;</button>
                         <span class="${dotClass}" title="${dotTitle}"></span>
                         <div class="img-filename-tag">${img.file}</div>
@@ -1605,6 +2030,40 @@
                 `;
                 const delBtn = card.querySelector('.ds-del');
                 if (delBtn) delBtn.onclick = (ev) => { ev.stopPropagation(); deleteDatasetImage(img.file); };
+
+                // Al pasar el raton se reproduce en silencio; al salir vuelve al inicio.
+                // Para un LoRA de efecto, el movimiento ES el contenido: una miniatura
+                // congelada no dice nada sobre lo que se va a entrenar.
+                // Hover plays it muted and leaving rewinds. For an effect LoRA the motion
+                // IS the content: a frozen thumbnail says nothing about what is trained.
+                const vid = card.querySelector('video');
+                if (vid) {
+                    // El fragmento #t=0.1 de la URL es una peticion, no una garantia:
+                    // si los metadatos aun no han cargado, el navegador no busca ese
+                    // fotograma y la miniatura se queda en negro. Y refrescar no lo
+                    // arreglaba porque reutilizaba el <video> ya cacheado.
+                    // Aqui se fuerza la busqueda en cuanto el elemento declara tener
+                    // metadatos, que es el unico momento en que se sabe que puede.
+                    //
+                    // The #t=0.1 URL fragment is a request, not a guarantee: with the
+                    // metadata not yet loaded the browser does not seek and the
+                    // thumbnail stays black. Refreshing did not help because it reused
+                    // the cached <video>. Here the seek is forced as soon as the
+                    // element reports having metadata, the only moment it can work.
+                    const pintarPortada = () => {
+                        try { if (vid.currentTime < 0.05) vid.currentTime = 0.1; } catch (e) {}
+                    };
+                    if (vid.readyState >= 1) pintarPortada();
+                    vid.addEventListener('loadedmetadata', pintarPortada, { once: true });
+                    // Ultimo recurso: algunos navegadores no emiten loadedmetadata con
+                    // preload="metadata" hasta que el elemento entra en pantalla.
+                    // Last resort: some browsers hold loadedmetadata back until the
+                    // element is scrolled into view.
+                    vid.addEventListener('loadeddata', pintarPortada, { once: true });
+
+                    card.onmouseenter = () => { vid.play().catch(() => {}); };
+                    card.onmouseleave = () => { vid.pause(); pintarPortada(); };
+                }
                 grid.appendChild(card);
             });
         }
@@ -1624,6 +2083,79 @@
                 if (data.status !== 'ok') { alert('Error: ' + (data.error || 'unknown')); return; }
                 loadDatasetInfo();
             } catch (e) { alert('Error: ' + e); }
+        }
+
+        async function convertFps() {
+            const msg = 'Prepare every clip for MiniMax-H3?\n\n'
+                      + '\u00bfPreparar todos los clips para MiniMax-H3?\n\n'
+                      + '\u2022 exactly 24 fps / 24 fps exactos\n'
+                      + '\u2022 frame count 17n+5, keeping the WHOLE clip\n'
+                      + '\u2022 recuento 17n+5, conservando el clip ENTERO\n\n'
+                      + 'Nothing is cut off the end; time is stretched by the couple of percent\n'
+                      + 'needed to reach a valid count. Re-encodes at crf 16.\n'
+                      + 'No se recorta nada por el final; se estira el tiempo el dos por ciento\n'
+                      + 'que haga falta para llegar a un recuento valido. Recodifica a crf 16.\n\n'
+                      + 'Originals are saved in _originals. / Los originales se guardan en _originals.';
+            if (!confirm(msg)) return;
+
+            const btn = document.getElementById('btn-fps');
+            const prev = btn ? btn.innerText : '';
+            if (btn) { btn.disabled = true; btn.innerText = '...'; }
+            try {
+                const res = await fetch('/api/prepare-clips', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    // Ya no se manda `frames`: el recuento lo decide la duracion
+                    // real del clip, no el ajuste de entrenamiento. Mandarlo hacia
+                    // que Prepare clips recortase el final del clip de origen, que
+                    // es justo lo que rompia el entrenamiento.
+                    // `frames` is no longer sent: the count is decided by the clip's
+                    // real duration, not by a training setting. Sending it made
+                    // Prepare clips cut the tail off the source clip, which is
+                    // exactly what was breaking training.
+                    body: JSON.stringify({ fps: 24 })
+                });
+                const data = await res.json();
+                if (data.status === 'error') { alert('Error: ' + (data.error || 'unknown')); return; }
+                let out = data.converted + ' converted / convertidos, '
+                        + data.skipped + ' untouched / sin tocar';
+                if (data.details && data.details.length) out += '\n\n' + data.details.join('\n');
+                // Los saltados importan tanto como los convertidos: un clip que ya
+                // tenia recuento valido se queda como esta, y si venia recortado de
+                // antes seguira recortado. En silencio parecia que todo fue bien.
+                // Skipped clips matter as much as converted ones: one that already
+                // had a valid count is left as it is, and if it arrived truncated it
+                // stays truncated. Silently, that looked like success.
+                if (data.skipped_details && data.skipped_details.length) {
+                    out += '\n\nUntouched / Sin tocar:\n' + data.skipped_details.join('\n');
+                }
+                if (data.warnings && data.warnings.length) out += '\n\nWarnings / Avisos:\n' + data.warnings.join('\n');
+                if (data.errors && data.errors.length) out += '\n\nErrors:\n' + data.errors.join('\n');
+                if (data.backup) out += '\n\nOriginals / Originales: ' + data.backup;
+
+                // El parte va SOLO a la consola. En un alert no se puede
+                // seleccionar el texto, y este es justo el parte que hay que releer
+                // -- y a veces pegar en otro sitio -- para comprobar que la
+                // conversion hizo lo que debia; se cierra el pop-up y ya no vuelve.
+                // En la consola queda, se copia y se puede comparar con el de la
+                // vez anterior.
+                //
+                // The report goes to the console ONLY. Text cannot be selected in an
+                // alert, and this is precisely the report that needs re-reading --
+                // and sometimes pasting elsewhere -- to confirm the conversion did
+                // the right thing; dismiss the pop-up and it is gone. In the console
+                // it stays, it copies, and it can be compared against last time's.
+                appendTerminal('');
+                appendTerminal('[PREPARE CLIPS] ' + new Date().toLocaleTimeString(),
+                               false, data.errors && data.errors.length ? 'term-danger' : 'term-success');
+                out.split('\n').forEach(function (linea) { appendTerminal(linea); });
+                appendTerminal('');
+                loadDatasetInfo();
+            } catch (e) {
+                alert('Error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerText = prev; }
+            }
         }
 
         async function deleteProjectData(target) {
@@ -1720,16 +2252,131 @@
         setInterval(loadPreviews, 8000);
         loadPreviews();
 
-        function openModal(imgSrc, filename, text) {
+        // ------------------------------------------------------------------
+        // ALTURA DE LA REJILLA DEL DATASET, AJUSTABLE A MANO.
+        //
+        // La rejilla estaba clavada en 380 px de max-height. Con miniaturas de
+        // 165 px eso son dos filas: en un dataset de veinte clips hay que
+        // recorrerla entera para ver lo que se tiene. Ahora la linea que la
+        // separa de las previews se arrastra.
+        //
+        // Los 380 px pasan a ser el minimo, no la medida fija: se puede agrandar
+        // y volver a comprimir exactamente hasta donde estaba. El techo es el
+        // 85% de la ventana, para que nunca desaparezca el tirador.
+        //
+        // Se usan eventos de puntero (no de raton) y setPointerCapture: sin la
+        // captura, arrastrar rapido saca el cursor del tirador, el navegador deja
+        // de mandar eventos y la barra se queda pegada al puntero.
+        //
+        // The dataset grid was pinned at a 380px max-height -- two rows of 165px
+        // thumbnails, so a twenty clip dataset had to be scrolled through to see
+        // what was in it. The line separating it from the previews now drags.
+        // 380px becomes the minimum rather than the fixed size: it grows and
+        // shrinks back to exactly where it was. The ceiling is 85% of the window
+        // so the handle can never be pushed off screen. Pointer events plus
+        // setPointerCapture are used because without the capture a fast drag
+        // takes the cursor off the handle, the browser stops sending events and
+        // the bar sticks to the pointer.
+        // ------------------------------------------------------------------
+        const DS_GRID_MIN = 380;               // el max-height de siempre / the long-standing max-height
+        const DS_GRID_STORE = 'ds_grid_height';
+
+        function applyDsGridHeight(px) {
+            const grid = document.getElementById('ds-grid');
+            if (!grid) return DS_GRID_MIN;
+            const techo = Math.max(DS_GRID_MIN, Math.round(window.innerHeight * 0.85));
+            const alto = Math.min(techo, Math.max(DS_GRID_MIN, Math.round(px)));
+            grid.style.maxHeight = alto + 'px';
+            return alto;
+        }
+
+        (function initDsResizer() {
+            const tirador = document.getElementById('ds-resizer');
+            const grid = document.getElementById('ds-grid');
+            if (!tirador || !grid) return;
+
+            // Un localStorage que falla (ventana privada, datos de sitio
+            // bloqueados) no debe impedir que la rejilla se dibuje.
+            // A failing localStorage (private window, blocked site data) must not
+            // stop the grid from rendering.
+            try {
+                const guardado = parseInt(localStorage.getItem(DS_GRID_STORE), 10);
+                if (guardado > 0) applyDsGridHeight(guardado);
+            } catch (e) {}
+
+            let arrastreY = 0, altoInicial = 0;
+
+            tirador.addEventListener('pointerdown', function (ev) {
+                ev.preventDefault();
+                arrastreY = ev.clientY;
+                altoInicial = grid.getBoundingClientRect().height;
+                tirador.classList.add('dragging');
+                tirador.setPointerCapture(ev.pointerId);
+            });
+
+            tirador.addEventListener('pointermove', function (ev) {
+                if (!tirador.classList.contains('dragging')) return;
+                applyDsGridHeight(altoInicial + (ev.clientY - arrastreY));
+            });
+
+            function soltar(ev) {
+                if (!tirador.classList.contains('dragging')) return;
+                tirador.classList.remove('dragging');
+                try { tirador.releasePointerCapture(ev.pointerId); } catch (e) {}
+                try { localStorage.setItem(DS_GRID_STORE, String(Math.round(grid.getBoundingClientRect().height))); } catch (e) {}
+            }
+            tirador.addEventListener('pointerup', soltar);
+            tirador.addEventListener('pointercancel', soltar);
+
+            // Doble clic: vuelta a la altura de siempre, sin tener que apuntar.
+            // Double-click: back to the long-standing height, without aiming.
+            tirador.addEventListener('dblclick', function () {
+                applyDsGridHeight(DS_GRID_MIN);
+                try { localStorage.removeItem(DS_GRID_STORE); } catch (e) {}
+            });
+
+            // Al encoger la ventana, una altura guardada puede pasarse del techo.
+            // Shrinking the window can leave a stored height above the ceiling.
+            window.addEventListener('resize', function () {
+                applyDsGridHeight(grid.getBoundingClientRect().height);
+            });
+        })();
+
+        function openModal(src, filename, text, esVideo) {
             currentEditingFilename = filename;
             document.getElementById('modal-filename').innerText = filename;
-            document.getElementById('modal-img').src = imgSrc;
+            const im = document.getElementById('modal-img');
+            const vi = document.getElementById('modal-vid');
+
+            if (esVideo) {
+                im.removeAttribute('src');
+                im.style.display = 'none';
+                vi.src = src;
+                vi.style.display = 'block';
+                vi.play().catch(() => {});
+            } else {
+                // Vaciar el src del video ANTES de ocultarlo: un <video> escondido
+                // con src sigue descargando y sigue sonando.
+                // Clear the video src BEFORE hiding it: a hidden <video> with a src
+                // keeps downloading and keeps playing.
+                vi.pause();
+                vi.removeAttribute('src');
+                vi.load();
+                vi.style.display = 'none';
+                im.src = src;
+                im.style.display = 'block';
+            }
             document.getElementById('modal-txt').value = text;
             document.getElementById('modal').classList.add('active');
         }
 
         function closeModal(e) {
             document.getElementById('modal').classList.remove('active');
+            // Cerrar el modal tiene que PARAR el clip: si no, se sigue oyendo
+            // detras de la interfaz.
+            // Closing must STOP the clip, or it keeps playing behind the UI.
+            const vi = document.getElementById('modal-vid');
+            if (vi) { vi.pause(); vi.removeAttribute('src'); vi.load(); }
         }
 
         async function saveCurrentCaption() {
