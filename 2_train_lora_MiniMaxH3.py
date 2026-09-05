@@ -8760,6 +8760,30 @@ def train_minimaxh3():
                 if not USE_AUDIO_LOSS:
                     pred_audio = None
 
+                # Un clip MUDO trae un relleno de silencio de una sola fila, no
+                # una pista. Entrenarlo le enseña al modelo que ese video suena a
+                # silencio, y con use_audio_loss activo -- que hace falta para las
+                # tomas de voz -- eso entraba al 50% del peso de la muestra,
+                # trabajando justo contra lo que se quiere aprender. Es lo que dice
+                # el docstring de make_audio_latent y no estaba implementado: los
+                # trainers de referencia le dan peso CERO.
+                #
+                # Se detecta por el tamaño, que no admite duda: el relleno es 1
+                # fila, y la pista mas corta que la rejilla permite (22 fotogramas,
+                # 0,917 s) son 74.
+                #
+                # A MUTE clip carries a one-row silence placeholder, not a track.
+                # Training it teaches the model that this video sounds like
+                # silence, and with use_audio_loss on -- needed for the voice takes
+                # -- that entered at 50% of the sample's weight, working against
+                # the very thing being learned. make_audio_latent's docstring
+                # already says the reference trainers give it ZERO weight; it was
+                # not implemented. Detected by size, unambiguously: the placeholder
+                # is 1 row and the shortest track the grid allows is 74.
+                audio_es_relleno = (target_audio is not None
+                                    and target_audio.ndim > 1
+                                    and int(target_audio.shape[1]) <= 4)
+
                 if solo_audio and USE_AUDIO_LOSS and pred_audio is not None \
                         and target_audio is not None:
                     loss = mse_loss_chunked(pred_audio, target_audio)
@@ -8773,7 +8797,8 @@ def train_minimaxh3():
                         "to train. Enable Train Audio. / Muestra de solo audio '{}' "
                         "con use_audio_loss=False: no hay nada que entrenar. "
                         "Activa Train Audio.".format(entry.get("name"), entry.get("name")))
-                elif USE_AUDIO_LOSS and pred_audio is not None and target_audio is not None:
+                elif (USE_AUDIO_LOSS and pred_audio is not None
+                        and target_audio is not None and not audio_es_relleno):
                     loss_video = mse_loss_chunked(pred_video, target_video)
                     loss_audio = mse_loss_chunked(pred_audio, target_audio)
                     loss = (loss_video + loss_audio) * 0.5
