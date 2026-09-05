@@ -63,9 +63,16 @@ echo [EN] Cause: You likely downloaded the repository as a ZIP file.
 echo [ES] Causa: Es probable que hayas descargado el proyecto en formato ZIP.
 echo.
 echo [EN] Converting it to a Git repository lets you update with one click
-echo [EN] from now on. Your settings and your models are NOT touched.
+echo [EN] from now on. Your settings, models and trained LoRAs are NOT touched.
 echo [ES] Convertirla en repositorio Git te permite actualizar con un clic
-echo [ES] a partir de ahora. Tus ajustes y tus modelos NO se tocan.
+echo [ES] a partir de ahora. Tus ajustes, modelos y LoRAs entrenados NO se tocan.
+echo.
+echo [EN] BUT every script (.py, .html, .bat) WILL BE REPLACED by the version
+echo [EN] on GitHub. If you edited any of them, those changes are lost. A copy
+echo [EN] is saved in _backup_before_update_... before anything is overwritten.
+echo [ES] PERO todos los scripts (.py, .html, .bat) SE SUSTITUIRAN por los de
+echo [ES] GitHub. Si has editado alguno, esos cambios se pierden. Antes de
+echo [ES] sobrescribir se guarda una copia en _backup_before_update_...
 echo.
 
 choice /C YN /M "[Y] Yes / Si  -  [N] No"
@@ -97,6 +104,7 @@ if "!BRANCH!"=="" (
     exit /b 1
 )
 
+call :SAFE_BACKUP
 git reset --hard origin/!BRANCH!
 if errorlevel 1 (
     echo [ERROR] Could not synchronize with GitHub.
@@ -212,6 +220,7 @@ if errorlevel 2 (
     goto :FINISH
 )
 
+call :SAFE_BACKUP
 git reset --hard origin/!BRANCH!
 if errorlevel 1 (
     echo.
@@ -288,8 +297,57 @@ exit /b 0
 
 
 :FINISH
+call :CHECK_DEPS
 echo.
 echo [EN] Update process completed.
 echo [ES] Proceso de actualizacion completado.
 echo.
 pause
+exit /b 0
+
+
+:CHECK_DEPS
+rem   Actualizar traia el codigo pero no los paquetes: una version que anade una
+rem   funcion dejaba el boton fallando con un ImportError en una instalacion por
+rem   lo demas correcta. Se comprueba e instala SOLO lo que falte; rehacer el
+rem   venv por dos paquetes de unos KB serian treinta minutos por nada.
+rem   Para anadir una dependencia, tocala en las DOS lineas de abajo.
+rem   Updating brought code but not packages. Only what is missing is installed;
+rem   rebuilding the venv over two tiny packages would be half an hour for
+rem   nothing. To add a dependency, edit BOTH lines below.
+set "VENV_PYTHON=%~dp0venv\Scripts\python.exe"
+if not exist "%VENV_PYTHON%" exit /b 0
+
+"%VENV_PYTHON%" -c "import einops, rotary_embedding_torch" >nul 2>&1
+if not errorlevel 1 (
+    echo [EN] Dependencies up to date.
+    echo [ES] Dependencias al dia.
+    exit /b 0
+)
+echo.
+echo [EN] This update needs packages that are not in the venv. Installing...
+echo [ES] Esta actualizacion necesita paquetes que no estan en el venv. Instalando...
+"%VENV_PYTHON%" -m pip install --upgrade einops rotary_embedding_torch
+exit /b 0
+
+
+:SAFE_BACKUP
+rem   Copia los scripts antes de sobrescribirlos. Cuesta menos de un segundo y se
+rem   hace siempre: comprobar si hacia falta costaria mas que la copia. Los pesos,
+rem   las caches y los LoRA entrenados NO se copian -- son gigabytes y el reset no
+rem   los toca, por no estar versionados.
+rem   Copies the scripts before overwriting: under a second, done unconditionally.
+rem   Weights, caches and trained LoRAs are NOT copied, being gigabytes and
+rem   untracked.
+for /f "tokens=1-5 delims=/:. " %%a in ("%DATE% %TIME%") do set "STAMP=%%c%%b%%a_%%d%%e"
+set "SAFE=%~dp0_backup_before_update_%STAMP%"
+md "%SAFE%" >nul 2>&1
+copy /Y "%~dp0*.py"   "%SAFE%\" >nul 2>&1
+copy /Y "%~dp0*.html" "%SAFE%\" >nul 2>&1
+copy /Y "%~dp0*.bat"  "%SAFE%\" >nul 2>&1
+copy /Y "%~dp0*.json" "%SAFE%\" >nul 2>&1
+echo.
+echo [EN] Current scripts copied to: %SAFE%
+echo [ES] Scripts actuales copiados a: %SAFE%
+echo.
+exit /b 0

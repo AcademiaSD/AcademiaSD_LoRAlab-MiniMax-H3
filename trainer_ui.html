@@ -843,6 +843,10 @@
                         <button type="button" class="btn btn-warning btn-sm" onclick="addTriggerToAllCaptions()"
                                 title="Applies to EVERY caption in the dataset at once: puts the trigger word at the front where it is missing, and adds or replaces the common description according to the selector. With the description box empty it only does the trigger, which is what this button always did. Pressing it twice changes nothing the second time. / Aplica de una vez a TODOS los captions del dataset: pone la palabra trigger al principio donde falte, y anade o reemplaza la descripcion comun segun el selector. Con la caja de descripcion vacia solo hace lo del trigger, que es lo que este boton hacia siempre. Pulsarlo dos veces no cambia nada la segunda.">
                             Apply to All / Aplicar a todos</button>
+                        <button type="button" class="btn btn-warning btn-sm" id="btn-vocals" onclick="extractVocals()"
+                                title="Separates voice from music and effects in every audio file of the dataset, with Mel-Band RoFormer. Use it on material taken from a film or an interview, where the dialogue rides over music and a LoRA would clone the mix instead of the voice. Do NOT use it on a clean recording: separation is destructive, it leaves artefacts on sibilants and transients, and the LoRA learns those too. It does not remove reverb either. Run it BEFORE Split, so the cuts come from one pass of the model. The model (~600 MB) downloads on first use into ./MelBandRoFormer, and needs einops, rotary_embedding_torch and librosa in the venv. Originals are moved to _originals. / Separa la voz de la musica y los efectos en todos los ficheros de audio del dataset, con Mel-Band RoFormer. Uselo con material de una pelicula o una entrevista, donde el dialogo va sobre musica y un LoRA clonaria la mezcla en vez de la voz. NO lo uses sobre una grabacion limpia: la separacion es destructiva, deja resonancias en las eses y en los transitorios, y el LoRA las aprende tambien. Tampoco quita reverberacion. Pasalo ANTES de Split, para que los cortes salgan de una sola pasada del modelo. El modelo (~600 MB) se descarga la primera vez en ./MelBandRoFormer, y necesita einops, rotary_embedding_torch y librosa en el venv. Los originales van a _originals.">
+                            Extract Vocals / Separar voz
+                        </button>
                         <button type="button" class="btn btn-warning btn-sm" id="btn-split" onclick="splitSamples()"
                                 title="Splits every sample longer than the Frames setting into consecutive takes of that length, so one long recording becomes many training samples. Works on audio, video and video+audio. Audio is cut at silences whenever one falls inside the window, so takes end on a pause instead of mid-word; video is cut on the frame. The leftover tail is kept if it reaches the minimum, and the originals are moved to _originals. A 30 s recording at 124 frames becomes six or seven takes: more samples, shorter sequences, and inside the duration range the model was trained on. / Trocea toda muestra mas larga que el ajuste Frames en tomas consecutivas de esa duracion, asi una grabacion larga se convierte en muchas muestras de entrenamiento. Vale para audio, video y video+audio. El audio se corta por los silencios siempre que haya uno dentro de la ventana, para que las tomas acaben en una pausa y no a media palabra; el video se corta por fotograma. La cola sobrante se conserva si llega al minimo, y los originales van a _originals. Una grabacion de 30 s a 124 fotogramas se convierte en seis o siete tomas: mas muestras, secuencias mas cortas, y dentro del rango de duracion con el que se entreno el modelo.">
                             Split / Trocear
@@ -2198,6 +2202,42 @@
                 if (data.status !== 'ok') { alert('Error: ' + (data.error || 'unknown')); return; }
                 loadDatasetInfo();
             } catch (e) { alert('Error: ' + e); }
+        }
+
+        async function extractVocals() {
+            const msg = 'Separate voice from music in every audio file?\n\n'
+                      + '\u00bfSeparar la voz de la m\u00fasica en todos los audios?\n\n'
+                      + '\u2022 first use downloads ~600 MB / la primera vez descarga ~600 MB\n'
+                      + '\u2022 run this BEFORE Split / hazlo ANTES de Split\n'
+                      + '\u2022 destructive: do not use on clean recordings\n'
+                      + '\u2022 destructivo: no lo uses en grabaciones limpias\n\n'
+                      + 'Originals are moved to _originals.';
+            if (!confirm(msg)) return;
+
+            const btn = document.getElementById('btn-vocals');
+            const prev = btn ? btn.innerText : '';
+            if (btn) { btn.disabled = true; btn.innerText = '...'; }
+            appendTerminal('[VOCALS] ' + new Date().toLocaleTimeString()
+                           + ' - separating, this takes a while / separando, tarda un rato...',
+                           false, 'term-warning');
+            try {
+                const res = await fetch('/api/extract-vocals', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'error') {
+                    appendTerminal('[VOCALS] ' + (data.error || 'unknown'), false, 'term-danger');
+                    alert('Error: ' + (data.error || 'unknown'));
+                    return;
+                }
+                appendTerminal('[VOCALS] ' + (data.processed || 0) + ' file(s) / ficheros', false, 'term-success');
+                (data.details || []).forEach(function (x) { appendTerminal('   ' + x); });
+                (data.errors || []).forEach(function (x) { appendTerminal('   ' + x, false, 'term-danger'); });
+                if (data.backup) appendTerminal('   originals / originales: ' + data.backup);
+                loadDatasetInfo();
+            } catch (e) {
+                alert('Error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerText = prev; }
+            }
         }
 
         async function splitSamples() {

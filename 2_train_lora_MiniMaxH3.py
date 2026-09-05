@@ -8645,7 +8645,30 @@ def train_minimaxh3():
                 # Same latent/noise/sigma/caption, adapter ON vs OFF. The plain loss
                 # cannot answer this because sigma sampling alone swings it 0.12-0.53.
                 # ------------------------------------------------------------
-                if (OVERFIT_PROBE_EVERY > 0 and step % OVERFIT_PROBE_EVERY == 0):
+                # Una toma de SOLO AUDIO no tiene imagen que aprender: su fila de
+                # video es el fotograma negro de relleno. Entrenarla enseñaria
+                # exactamente eso, negro, y ese daño no se queda en las tomas de
+                # audio -- va a los mismos pesos LoRA que usan las de video.
+                # An AUDIO-ONLY take has no picture to learn: its video row is the
+                # black filler frame. Training on it would teach exactly that, and
+                # the damage does not stay local -- it lands in the same LoRA
+                # weights the video takes use.
+                solo_audio = str(entry.get("kind", "video")) == "audio"
+
+                # La sonda mide si el LoRA mejora su prediccion sobre la IMAGEN
+                # de la propia muestra. En una toma de solo audio la imagen es el
+                # fotograma negro de relleno, que a proposito no recibe gradiente:
+                # la sonda avisa correctamente de que no mejora, pero de algo que
+                # nadie esta entrenando. Ese aviso, repetido cada N pasos en una
+                # corrida que va bien, ensena a ignorar los avisos.
+                # The probe measures whether the LoRA improves its prediction on
+                # the sample's own IMAGE. On an audio-only take the image is the
+                # black filler frame, which deliberately gets no gradient: the
+                # warning is correct about something nobody is training. Repeated
+                # every N steps through a healthy run, it teaches people to ignore
+                # warnings.
+                if (OVERFIT_PROBE_EVERY > 0 and step % OVERFIT_PROBE_EVERY == 0
+                        and not solo_audio):
                     try:
                         _tv = target_video.detach().float()
                         _var = max(float(_tv.var()), 1e-8)
@@ -8679,16 +8702,6 @@ def train_minimaxh3():
                                 flush=True)
                     except Exception as _e:
                         log_print("[FIT-PROBE] fallo: {}".format(_e), flush=True)
-
-                # Una toma de SOLO AUDIO no tiene imagen que aprender: su fila de
-                # video es el fotograma negro de relleno. Entrenarla enseñaria
-                # exactamente eso, negro, y ese daño no se queda en las tomas de
-                # audio -- va a los mismos pesos LoRA que usan las de video.
-                # An AUDIO-ONLY take has no picture to learn: its video row is the
-                # black filler frame. Training on it would teach exactly that, and
-                # the damage does not stay local -- it lands in the same LoRA
-                # weights the video takes use.
-                solo_audio = str(entry.get("kind", "video")) == "audio"
 
                 # El mismo diagnostico para el AUDIO. Es la unica senal que dice,
                 # en el primer paso y sin esperar una hora, si la cadena entera

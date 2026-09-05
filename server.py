@@ -1293,6 +1293,111 @@ def _split_points(duracion, ventana, minimo, silencios):
     return cortes, duros
 
 
+@app.route("/api/extract-vocals", methods=["POST"])
+def extract_vocals():
+    """Separa la voz de la musica y los efectos en todas las muestras con audio.
+
+    CUANDO USARLO Y CUANDO NO.
+    Un dataset sacado de material real -- una pelicula, una entrevista -- trae
+    musica y efectos encima del dialogo, y un LoRA entrenado con eso clona la
+    mezcla, no la voz. Ahi separar es imprescindible. Sobre una grabacion que ya
+    viene limpia, EMPEORA: la separacion es destructiva, deja resonancias en las
+    eses y en los transitorios, y el LoRA aprende tambien ese caracter.
+    Tampoco quita reverberacion: separa fuentes, no arregla la sala.
+
+    Va ANTES de Split, no despues. Separado el material entero, los cortes salen
+    de una sola pasada del modelo; al reves, cada trozo se separaria por su
+    cuenta y los artefactos variarian entre tomas del mismo dataset.
+
+    El modelo (~600 MB) se descarga la primera vez que se pulsa, como hace el
+    captioner con Qwen3-VL. Las tres dependencias se comprueban ANTES de
+    descargar nada: no tiene sentido bajar 600 MB para fallar despues en un
+    import.
+
+    Separates voice from music and effects. Essential on material taken from a
+    film or an interview, where a LoRA would otherwise clone the mix; harmful on
+    already-clean recordings, since separation is destructive and leaves
+    artefacts on sibilants and transients that the LoRA learns too. It does not
+    remove reverb: it separates sources, not rooms. It runs BEFORE Split, so the
+    cuts come from a single pass of the model rather than one pass per piece
+    with artefacts varying between takes. The model (~600 MB) downloads on first
+    use, like the captioner's Qwen3-VL; the three dependencies are checked BEFORE
+    downloading anything.
+    """
+    try:
+        if get_status().get("running"):
+            return jsonify({"status": "error",
+                            "error": "A process is running. Stop it first. / "
+                                     "Hay un proceso en marcha. Detenlo primero."}), 409
+
+        import sys
+        sys.path.insert(0, str(BASE_DIR))
+        from melband import separator as sep
+
+        faltan = sep.dependencias_que_faltan()
+        if faltan:
+            return jsonify({"status": "error",
+                            "error": "Missing packages: {}. Install them in the venv with "
+                                     "pip install {} / Faltan paquetes: {}. Instalalos en el "
+                                     "venv con pip install {}"
+                                     .format(", ".join(faltan), " ".join(faltan),
+                                             ", ".join(faltan), " ".join(faltan))}), 400
+
+        ffmpeg = _ffbin("ffmpeg")
+        if not ffmpeg:
+            return jsonify({"status": "error",
+                            "error": "ffmpeg not found in PATH. / No se encuentra ffmpeg."}), 400
+
+        dataset_dir = get_dataset_dir()
+        if not dataset_dir.is_dir():
+            return jsonify({"status": "error", "error": "No dataset folder / No hay dataset"}), 404
+
+        muestras = [f for f in sorted(dataset_dir.iterdir())
+                    if f.is_file() and f.suffix.lower() in AUDIO_EXTS]
+        if not muestras:
+            return jsonify({"status": "ok", "processed": 0,
+                            "message": "No audio files / No hay ficheros de audio"})
+
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        modelo = sep.cargar(str(BASE_DIR / "MelBandRoFormer"), device, log=print)
+        if modelo is None:
+            return jsonify({"status": "error",
+                            "error": "Could not load the separation model. / "
+                                     "No se pudo cargar el modelo de separacion."}), 500
+
+        backup = dataset_dir / "_originals"
+        hechos, errores = [], []
+        for m in muestras:
+            try:
+                pcm = sep.leer_pcm(m, ffmpeg)
+                if pcm.size == 0:
+                    errores.append("{}: empty / vacio".format(m.name))
+                    continue
+                voz = sep.separar_voz(modelo, pcm, device)
+
+                backup.mkdir(exist_ok=True)
+                tmp = backup / ("__vocals__" + m.name)
+                sep.escribir_pcm(voz, tmp, ffmpeg)
+                shutil.move(str(m), str(backup / m.name))
+                shutil.move(str(tmp), str(m))
+                hechos.append("{} ({:.1f}s)".format(m.name, pcm.shape[1] / sep.SR))
+            except Exception as exc:
+                errores.append("{}: {}".format(m.name, exc))
+
+        del modelo
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        return jsonify({"status": "ok" if not errores else "partial",
+                        "processed": len(hechos), "details": hechos, "errors": errores,
+                        "backup": str(backup) if hechos else None})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/api/split-samples", methods=["POST"])
 def split_samples():
     """Trocea las muestras largas en tomas de la duracion configurada.

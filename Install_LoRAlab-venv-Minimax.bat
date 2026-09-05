@@ -366,6 +366,24 @@ pause
 exit /b 1
 )
 echo [OK] BitsAndBytes y utilidades listos.
+echo.
+
+:: Separacion de voz (Mel-Band RoFormer). Dos paquetes de unos pocos KB:
+:: solo se usan si se pulsa Extract Vocals, pero instalarlos aqui evita que
+:: el boton falle con un ImportError la primera vez. Los pesos (~600 MB) NO
+:: se descargan aqui, sino al pulsarlo.
+:: Vocal separation: two tiny packages, only used by Extract Vocals, but
+:: installed here so the button does not fail with an ImportError. The
+:: weights (~600 MB) are NOT downloaded here, only when pressed.
+echo [INFO] Instalando dependencias de separacion de voz...
+"%VENV_PYTHON%" -m pip install --upgrade einops rotary_embedding_torch
+if errorlevel 1 (
+echo [AVISO] No se pudieron instalar einops / rotary_embedding_torch.
+echo         El entrenamiento funciona igual; solo Extract Vocals quedara
+echo         sin uso hasta instalarlos a mano.
+) else (
+echo [OK] Separacion de voz lista.
+)
 
 :: ========================================================
 :: 8/8 - COMPROBACION FINAL
