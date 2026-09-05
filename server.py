@@ -867,18 +867,39 @@ def dataset_info():
     if dataset_dir.is_dir():
         candidatos = [f for f in sorted(dataset_dir.iterdir())
                       if f.is_file() and f.suffix.lower() in DATASET_EXTS]
-        # Saber si un clip trae pista de audio cuesta un ffprobe. En un modelo que
-        # genera imagen y sonido a la vez, un clip mudo entrena la mitad y la
-        # miniatura no lo delata, asi que merece la pena preguntarlo -- pero no a
-        # cualquier precio: por encima de este limite se devuelve None y la
-        # interfaz no pinta el indicador, en vez de tardar diez segundos en listar.
-        # Knowing whether a clip carries audio costs one ffprobe. On a model that
-        # generates picture and sound together a mute clip trains half of it and
-        # the thumbnail does not show it, so it is worth asking -- but not at any
-        # price: past this limit it returns None and the UI draws no badge rather
-        # than taking ten seconds to list the folder.
-        sondear_audio = sum(1 for f in candidatos
-                            if f.suffix.lower() in VIDEO_EXTS) <= 60
+        # Saber si un clip trae pista de audio cuesta un ffprobe. Aqui habia un
+        # limite: por encima de 60 videos se devolvia None y la interfaz no
+        # pintaba nada. La intencion era buena -- no tardar diez segundos en
+        # listar la carpeta -- pero el efecto era el peor posible: el indicador
+        # desaparecia justo en los datasets grandes, que son donde no puedes
+        # revisar clip por clip, y su ausencia no se distingue de "todos tienen
+        # audio". Trocear una pelicula da 100 clips y de golpe no se veia ninguno.
+        #
+        # En vez de subir el numero, se abarata la pregunta: el resultado se
+        # cachea por (ruta, mtime, tamano), asi que solo se paga por fichero
+        # nuevo o modificado, y los que faltan se sondean en paralelo. Un
+        # ffprobe son ~40 ms; cien en serie son cuatro segundos y con ocho hilos
+        # medio. Los listados siguientes no cuestan nada.
+        #
+        # There used to be a limit here: past 60 videos this returned None and
+        # the UI drew nothing. The intent was right -- not spending ten seconds
+        # listing a folder -- but the effect was the worst possible: the badge
+        # vanished precisely on the large datasets where you cannot check clip by
+        # clip, and its absence is indistinguishable from "they all have audio".
+        # Splitting a film gives 100 clips and suddenly none of them showed one.
+        # Rather than raising the number, the question is made cheap: results are
+        # cached by (path, mtime, size) so only new or changed files cost
+        # anything, and the misses are probed in parallel. One ffprobe is ~40 ms;
+        # a hundred in series is four seconds, with eight threads half of one.
+        pendientes = [f for f in candidatos
+                      if kind_of(f) == "video" and _audio_probe_key(f) not in _AUDIO_PROBE_CACHE]
+        if pendientes:
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(_has_audio, pendientes))
+            except Exception:
+                pass          # si falla, cada uno se sondea abajo de uno en uno
         for file_path in candidatos:
             if True:
                 txt_path = file_path.with_suffix(".txt")
@@ -892,8 +913,7 @@ def dataset_info():
                     "file": file_path.name,
                     "kind": kind_of(file_path),
                     "has_audio": (_has_audio(file_path)
-                                  if (kind_of(file_path) == "video" and sondear_audio)
-                                  else None),
+                                  if kind_of(file_path) == "video" else None),
                     "has_txt": txt_path.exists(),
                     "caption": caption,
                 })
@@ -1179,6 +1199,23 @@ def _ffbin(name):
     return found
 
 
+# Resultado de la sonda, cacheado por (ruta, mtime, tamano). La clave lleva el
+# mtime a proposito: si el fichero cambia -- lo vuelves a trocear, le pegas una
+# pista -- la clave cambia con el y no hay que invalidar nada a mano.
+# Probe results cached by (path, mtime, size). The mtime is in the key on
+# purpose: if the file changes -- re-split, audio added -- the key changes with
+# it and nothing has to be invalidated by hand.
+_AUDIO_PROBE_CACHE = {}
+
+
+def _audio_probe_key(path):
+    try:
+        st = os.stat(str(path))
+        return (str(path), st.st_mtime_ns, st.st_size)
+    except Exception:
+        return (str(path), 0, 0)
+
+
 def _has_audio(path):
     """True si el fichero trae al menos un stream de audio.
 
@@ -1191,8 +1228,16 @@ def _has_audio(path):
     seeing up front rather than discovering it when the generated audio is
     silent.
     """
+    clave = _audio_probe_key(path)
+    if clave in _AUDIO_PROBE_CACHE:
+        return _AUDIO_PROBE_CACHE[clave]
+
     probe = _ffbin("ffprobe")
     if not probe:
+        # Sin ffprobe no se sabe, y NO se cachea: instalarlo despues debe bastar
+        # para que el indicador aparezca, sin reiniciar el servidor.
+        # Without ffprobe there is no answer, and it is NOT cached: installing it
+        # afterwards should be enough, with no server restart.
         return False
     try:
         out = subprocess.run(
@@ -1200,9 +1245,18 @@ def _has_audio(path):
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
             capture_output=True, text=True, timeout=30,
         ).stdout.strip()
-        return bool(out)
+        resultado = bool(out)
     except Exception:
         return False
+
+    # Tope tonto pero suficiente: un dataset no llega a 5.000 clips, y si llega,
+    # vaciar y volver a llenar cuesta lo mismo que la primera vez.
+    # Crude cap: a dataset does not reach 5,000 clips, and if it does, emptying
+    # and refilling costs what the first fill did.
+    if len(_AUDIO_PROBE_CACHE) > 5000:
+        _AUDIO_PROBE_CACHE.clear()
+    _AUDIO_PROBE_CACHE[clave] = resultado
+    return resultado
 
 
 def _video_info(path):
