@@ -2722,6 +2722,22 @@
             });
             const data = await res.json();
             if (data.status === 'ok') {
+                // Guardar tiene que MOVER la referencia con la que se detectan los
+                // cambios sin guardar. Sin esto, el texto en pantalla seguia
+                // distinto del que se leyo al abrir -- que es justamente lo que se
+                // acaba de guardar -- y closeModal avisaba de que se iban a perder
+                // unos cambios que ya estaban en disco. Un aviso que salta cuando
+                // no toca es peor que no tenerlo: ensena a decir que si sin leerlo,
+                // y el dia que avise de verdad tampoco se leera.
+                //
+                // Saving must MOVE the baseline used to detect unsaved edits.
+                // Without this the on-screen text still differed from the one read
+                // when the modal opened -- which is exactly what was just saved --
+                // and closeModal warned about losing changes already on disk. A
+                // warning that fires when it should not is worse than none: it
+                // teaches people to dismiss it unread, and the day it matters it
+                // will be dismissed too.
+                captionAlAbrir = newCaption;
                 alert('✓ Caption saved / Caption guardado!');
                 closeModal();
                 loadDatasetInfo();
