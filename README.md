@@ -316,6 +316,74 @@ teaches the model that the final state's words belong to a half-finished image.
 
 **Set Frames to the clip length**, not lower, unless you deliberately want a shorter arc.
 
+#### Training audio
+
+Drop `.wav`, `.mp3`, `.flac` or `.m4a` next to their `.txt` captions, the same
+way as clips. A folder may hold any mixture:
+
+| Dataset | What it trains |
+| :--- | :--- |
+| audio takes only | the audio branch only |
+| mute clips + audio takes | video from the clips, audio from the takes |
+| clips with a track + audio takes | both from the clips, audio from the takes |
+| clips with a track | both, from the same clip |
+
+Tick **Train Audio** in the training settings. Without it an audio-only sample
+has nothing to learn and the trainer stops rather than train the filler frame.
+
+A track's valid durations are the video grid seen at 24 fps -- 0.917, 1.625,
+2.333, 3.042, 3.750, 4.458, 5.167 s -- because H3's audio VAE produces exactly
+40 latents per second and channel. Nothing needs converting: **Split** cuts long
+recordings at silences into takes of the length in **Frames**, and each take is
+padded up to the grid rather than trimmed, so no word is lost at the end.
+
+There is no automatic captioner for audio: Qwen3-VL cannot hear. Write the
+captions by hand, or fill them all at once with the common description box in
+the Dataset Manager.
+
+#### The one thing to know before training audio
+
+**The LoRA has no audio-specific weights.** Every one of its 416 tensors sits in
+the shared transformer blocks; not one touches `audio_proj_in` or
+`audio_proj_out`. Gradients from the audio loss land on the same weights the
+video branch uses, and that branch never gets a gradient of its own on an
+audio-only dataset. Its weights drift, and past a point they stop meaning
+anything.
+
+Measured over eight runs on 69 voice takes, at `lr 4e-4`:
+
+| Steps | Timbre | Prompt following | Video |
+| ---: | :--- | :--- | :--- |
+| 500 | close, not there | kept | intact |
+| 600 | close, not there | kept | intact |
+| 700 | perfect | **lost** | **broken** |
+| 1000 | perfect | **lost** | **broken** |
+
+What is trained improves the further the weights move; what is not trained
+degrades on exactly the same axis. The two cross, and no learning rate or
+schedule moves that crossing -- lowering the rate only takes longer to reach the
+same place. `lr x steps` predicts both: 2e-4 over 1000 steps behaves like 4e-4
+over 500.
+
+**Anchor clips are what separates them.** A handful of video samples give the
+video branch a gradient of its own, so it is corrected at every step instead of
+drifting. Their captions must NOT carry the trigger word, and -- this matters
+more than it sounds -- **they must be varied**. Ten near-identical talking heads
+do not anchor a region, they anchor a point: the LoRA then produces that one
+scene and collapses on any prompt asking for something else. Thirty varied
+clips, at rank 16, held a prompt asking for a beach, a red t-shirt and a black
+cap while reproducing the trained voice.
+
+| Run | Anchors | Rank | Steps | Spectral distance to the real voice |
+| :--- | ---: | ---: | ---: | ---: |
+| audio only | 0 | 8 | 600 | 0.412 |
+| audio only | 0 | 8 | 1000 | 0.343 (prompt lost) |
+| **anchored** | **30 varied** | **16** | **1000** | **0.240** |
+
+Rank matters here for a specific reason: with rank 8 the timbre can only be
+represented by moving each weight a long way, and that movement is what breaks
+the conditioning. Rank 16 fits the same timbre with less displacement.
+
 ### 3. Pre-Cache
 
 1. Enter a **Project Name** and a **Trigger Word**.
@@ -431,7 +499,8 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 
 ## ⚠️ Beta notes & known limitations
 
-* **Audio is not trained.** Images and video clips are. The pre-cache already reads the audio VAE's geometry (32 kHz, 32 latent channels, the same 17n+5 grid) so that adding it later does not change the cache format, but nothing writes audio latents yet.
+* **Audio training has no dedicated weights.** The LoRA lives entirely in the shared transformer blocks, so training audio moves weights the video branch depends on. On an audio-only dataset that branch drifts and eventually stops producing anything coherent. Anchor clips fix it, and the README section above says how; there is no setting that avoids the need for them.
+* **No captioner hears.** Qwen3-VL describes pictures, so audio captions are written by hand or filled in bulk. The prompt selector keeps an audio entry so the text is ready when a model that listens exists.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
 * **8 GB is the floor.** For images, even at 448×448 there are 5.90 GB that stay resident no matter how many blocks you swap out. For clips at 192×192 the floor is 6.3 GB. A 6 GB card has nowhere left for the desktop either way, and 4 GB does not fit at any resolution.
