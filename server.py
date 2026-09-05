@@ -562,6 +562,7 @@ def cache_info():
     # is set by the largest sample, not the average.
     max_video = 0
     max_frames = 0
+    max_audio = 0
     for f in cache_dir.glob("*_info.json"):
         if f.name.startswith("_") or f.name == "cache_info.json":
             continue
@@ -570,6 +571,29 @@ def cache_info():
             shape = d.get("latent_shape")
             if shape and len(shape) >= 5:
                 max_video = max(max_video, int(shape[2]) * (int(shape[3]) // 2) * (int(shape[4]) // 2))
+            # LAS FILAS DE AUDIO CUENTAN COMO TOKENS.
+            #
+            # Faltaban aqui, y el error tiraba en la peor direccion posible: en un
+            # dataset de solo audio el unico latente de video es el fotograma
+            # negro de relleno, que son 1 token, asi que la interfaz veia una
+            # secuencia de 105 tokens donde el entrenador contaba 415. Con eso
+            # repartia cuatro bloques residentes de mas, escribia un budget de
+            # 15,22 GB en una tarjeta de 15,92, y el entrenamiento saturaba la
+            # VRAM y se desplomaba de velocidad -- sin ningun mensaje, porque
+            # nadie estaba mintiendo: los dos calculos eran correctos sobre datos
+            # distintos.
+            #
+            # AUDIO ROWS COUNT AS TOKENS. They were missing here, and the error
+            # pulled the worst way: on an audio-only dataset the only video latent
+            # is the black filler frame -- one token -- so the UI saw a 105 token
+            # sequence where the trainer counted 415. That handed out four
+            # resident blocks too many and wrote a 15.22 GB budget on a 15.92 GB
+            # card; training saturated and collapsed in speed, silently, because
+            # neither calculation was wrong -- they were right about different
+            # data.
+            forma_audio = d.get("audio_latent_shape")
+            if forma_audio and len(forma_audio) >= 3:
+                max_audio = max(max_audio, int(forma_audio[2]))
             nf = int(d.get("num_frames", 0) or 0)
             if nf > max_frames:
                 max_frames = nf
@@ -584,6 +608,10 @@ def cache_info():
     if images:
         out.update({"available": True, "images": images,
                     "max_text_tokens": max_text, "max_video_tokens": max_video,
+                    # Un relleno de silencio es 1 fila; la pista mas corta que la
+                    # rejilla admite son 74. Por encima de 4 hay audio de verdad.
+                    # A silence placeholder is 1 row; the shortest real track is 74.
+                    "max_audio_rows": max_audio,
                     "cached_num_frames": max_frames,
                     "cached_target_area": cached_area,
                     "form_target_area": int(cfg.get("target_area", 0) or 0)})

@@ -4967,7 +4967,7 @@ def _nf4_swap_backward_hook(module, grad_input, grad_output):
 #
 # de donde, quitando base y swap que el plan ya cuenta aparte:
 #
-#     activaciones = 1,056 + 0,002161 x tokens
+#     activaciones = 1,672 + 0,001663 x tokens
 #
 # Error maximo 0,33 GiB en las seis. Y da 2,14 GB para 500 tokens, o sea que
 # REPRODUCE el 2,5 antiguo en el caso para el que se calibro: no es un cambio de
@@ -4982,8 +4982,32 @@ def _nf4_swap_backward_hook(module, grad_input, grad_output):
 # a 0.33 GiB worst-case error -- and it yields 2.14 GB at 500 tokens, so it
 # REPRODUCES the old constant in the case it was calibrated for.
 # ---------------------------------------------------------------------------
-# Reajustado con OCHO picos reales (2-25 bloques, 1.332 y 2.048 tokens):
-#     pico = 3,264 + 0,002340 x tokens + 0,3542 x N      error maximo 0,24 GiB
+# Reajustado con ONCE picos reales (2-28 bloques) y, esto es lo importante,
+# TRES longitudes de secuencia en vez de dos: 415, 1.480 y 2.240 tokens.
+#     pico = 4,667 + 0,001663 x tokens + 0,3479 x N      error maximo 0,52 GiB
+#
+# POR QUE HACIA FALTA REAJUSTARLA. Las ocho medidas anteriores cubrian de 1.332
+# a 2.240 tokens: un rango de 1,7x. Con tan poco brazo de palanca, la constante y
+# el termino por token son casi indistinguibles -- cualquier pareja que sume lo
+# mismo en mitad del rango reproduce las ocho medidas -- y el ajuste repartio mal
+# el reparto entre los dos: demasiado en el token, demasiado poco en la
+# constante. Dentro del rango daba igual, porque el error se cancelaba. Fuera no:
+# a 415 tokens, que es lo que mide un dataset de SOLO AUDIO, la recta vieja se
+# quedaba 0,95 GiB corta y el plan repartia dos o tres bloques de mas.
+# Las tres medidas de audio dan el tercer punto de apoyo, y con el la constante
+# sube de 3,264 a 4,667 mientras el termino por token baja de 0,002340 a
+# 0,001663. Sobre las ONCE medidas el error maximo pasa de 1,51 a 0,52 GiB, y
+# dentro del rango de video las predicciones apenas se mueven (< 0,45 GiB).
+#
+# Refit against ELEVEN real peaks (2-28 blocks) and -- this is what matters --
+# THREE sequence lengths instead of two: 415, 1,480 and 2,240 tokens. The
+# previous eight spanned 1,332 to 2,240, a 1.7x range, too little leverage to
+# separate the constant from the per-token term: any pair summing the same
+# mid-range fits them all. Inside that range the misallocation cancelled; outside
+# it did not. At 415 tokens -- an AUDIO-ONLY dataset -- the old line fell 0.95
+# GiB short and the plan handed out two or three blocks too many. Worst-case
+# error over the eleven drops from 1.51 to 0.52 GiB, and predictions inside the
+# video range barely move (< 0.45 GiB).
 # donde `tokens` son los de la muestra MAS GRANDE, leidos de latent_shape, no
 # una media: el pico lo marca la peor muestra. / where `tokens` is the LARGEST
 # sample's, read from latent_shape rather than averaged.
@@ -4998,8 +5022,8 @@ def _nf4_swap_backward_hook(module, grad_input, grad_output):
 # measured 0.3542 and the 0.3332 a NF4 block weighs, i.e. dequant workspace) is
 # folded into the constant at a typical N of 17, because the plan needs the
 # overhead BEFORE deciding how many blocks fit and so cannot depend on N.
-ACT_BASE_GB = 0.377
-ACT_PER_TOKEN_GB = 0.002340
+ACT_BASE_GB = 1.672
+ACT_PER_TOKEN_GB = 0.001663
 
 
 def cache_sequence_tokens(cache_dir):
@@ -5364,7 +5388,7 @@ def setup_block_cpu_offload(transformer, target_vram_gb=None, reserve_gb=None):
         if seq_tokens > 0:
             log_print(
                 "[VRAM-PLAN] Secuencia de {} tokens -> overhead de entrenamiento {:.2f} GB "
-                "(1,056 + 0,002161 x tokens, calibrado sobre 6 picos reales). El valor fijo "
+                "(1,672 + 0,001663 x tokens, calibrado sobre 11 picos reales). El valor fijo "
                 "de {:.2f} GB solo valia para imagenes. / {} token sequence -> {:.2f} GB "
                 "training overhead; the fixed {:.2f} GB only held for images."
                 .format(seq_tokens, overhead_gb, float(VRAM_TRAINING_OVERHEAD_GB),

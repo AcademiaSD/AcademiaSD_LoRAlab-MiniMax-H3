@@ -1237,15 +1237,65 @@
             // ACT_PER_TOKEN_GB). Si se tocan aqui, hay que tocarlas alli.
             // Identical to the trainer's ACT_BASE_GB / ACT_PER_TOKEN_GB. Change one,
             // change the other.
-            ACT_BASE_GB: 0.377,
-            ACT_PER_TOKEN_GB: 0.002340,
-            NW_CONST_V: 1.345,     // no-pesos VIDEO / video, constant part
-            NW_PER_TOK_V: 0.002340,// no-pesos VIDEO: por token / video, per token
-            BLOCK_GIB_V: 0.3542,   // bloque residente en video: pesa 0,3332 mas el
+            ACT_BASE_GB: 1.672,
+            ACT_PER_TOKEN_GB: 0.001663,
+            // REAJUSTADAS con ONCE picos y TRES longitudes de secuencia (415,
+            // 1.480 y 2.240 tokens) en vez de ocho picos y dos longitudes.
+            //
+            // Las ocho viejas cubrian un rango de 1,7x, y con tan poco brazo de
+            // palanca la constante y el termino por token no se distinguen: el
+            // ajuste puso de mas en el token y de menos en la constante. Dentro
+            // del rango se cancelaba; a 415 tokens -- un dataset de SOLO AUDIO --
+            // la recta se quedaba 0,95 GiB corta, el plan repartia 30 bloques
+            // donde caben 28, y el pico real de 15,87 GiB en una tarjeta de 15,92
+            // caia en memoria compartida: la velocidad se desplomaba sin que
+            // ningun mensaje dijera por que.
+            // Error maximo sobre las once medidas: 1,51 -> 0,52 GiB. Las
+            // predicciones dentro del rango de video se mueven menos de 0,45.
+            //
+            // REFIT against ELEVEN peaks and THREE sequence lengths instead of
+            // eight and two. The old eight spanned a 1.7x range, too little
+            // leverage to separate the constant from the per-token term. Inside
+            // that range the error cancelled; at 415 tokens -- an AUDIO-ONLY
+            // dataset -- the line fell 0.95 GiB short, the plan handed out 30
+            // blocks where 28 fit, and a real 15.87 GiB peak on a 15.92 GiB card
+            // spilled into shared memory, collapsing the speed silently.
+            // Worst-case error over the eleven: 1.51 -> 0.52 GiB.
+            NW_CONST_V: 2.748,     // no-pesos VIDEO / video, constant part
+            NW_PER_TOK_V: 0.001663,// no-pesos VIDEO: por token / video, per token
+            BLOCK_GIB_V: 0.3479,   // bloque residente en video: pesa 0,3332 mas el
                                    // workspace de dequantizacion / resident block in
                                    // video: 0.3332 of weights plus dequant workspace
-            SLACK_GIB:  0.50,      // aire bajo el TOTAL de la tarjeta; por debajo de
-                                   // ~0,3 empiezan los reintentos y la memoria compartida
+            SLACK_GIB:  1.00,      // aire bajo el TOTAL de la tarjeta; por debajo de
+                                   // ~0,3 empiezan los reintentos y la memoria compartida.
+                                   //
+                                   // Sube de 0,50 a 1,00 porque el aire tiene que
+                                   // cubrir DOS cosas y solo cubria una. La segunda
+                                   // es el error de la propia recta: con once
+                                   // medidas el residuo peor es 0,47 GiB y se
+                                   // inclina a quedarse CORTO en las secuencias
+                                   // largas, asi que con 0,50 de aire el margen
+                                   // efectivo era de 0,03. La primera es lo que
+                                   // crezca el escritorio DURANTE la corrida: los
+                                   // picos se midieron con el navegador y las
+                                   // previews abiertos, pero abrir cualquier cosa
+                                   // mas mueve la cifra, y pasarse no cuesta un
+                                   // error sino memoria compartida y la velocidad
+                                   // por los suelos, sin ningun aviso.
+                                   // Cuesta un bloque, ~0,12 s/it. Bajarlo a 0,50
+                                   // es legitimo si nada mas usa la tarjeta.
+                                   //
+                                   // Raised from 0.50 to 1.00 because the slack has
+                                   // to cover TWO things and covered one. First, the
+                                   // line's own error: worst residual over eleven
+                                   // measurements is 0.47 GiB and it leans SHORT on
+                                   // long sequences, leaving 0.03 of real margin.
+                                   // Second, whatever the desktop grows by DURING
+                                   // the run: the peaks were measured with a browser
+                                   // and the previews open, and anything else opened
+                                   // moves the number. Overshooting costs no error,
+                                   // just shared memory and a collapsed speed, with
+                                   // nothing said. Price: one block, ~0.12 s/it.
             BLOCK_GB:   0.333205,  // el mismo bloque en GB decimales, para el budget
             BASE_GB:    2.06,
             OVERHEAD:   2.5,       // vram_training_overhead_gb, va DENTRO del budget
@@ -1306,7 +1356,17 @@
             if (vramCacheInfo && vramCacheInfo.available && vramCacheInfo.max_video_tokens > 0) {
                 videoTokens = vramCacheInfo.max_video_tokens;
             }
-            return { total: textTokens + videoTokens + 4, textTokens, videoTokens,
+            // Las filas de audio viajan en la MISMA secuencia empaquetada, asi que
+            // cuentan igual que las de video. Sin sumarlas, un dataset de voz
+            // parecia de 105 tokens cuando eran 415, y el plan repartia de mas.
+            // Audio rows ride in the SAME packed sequence and count like video
+            // ones. Without them a voice dataset looked like 105 tokens when it
+            // was 415, and the plan handed out too many blocks.
+            const audioRows = (vramCacheInfo && vramCacheInfo.available
+                               && vramCacheInfo.max_audio_rows > 0)
+                ? vramCacheInfo.max_audio_rows : 0;
+            return { total: textTokens + videoTokens + audioRows + 4,
+                     textTokens, videoTokens, audioRows,
                      latentFrames, pixFrames, area, formArea, source, stale };
         }
 
@@ -1322,11 +1382,33 @@
         function vramComputeFor(targetGiB) {
             const M = VRAM_MODEL;
             const seq = vramSequenceTokens();
-            const esVideo = seq.latentFrames > 1;
+            // Con audio real la secuencia es larga aunque haya UN fotograma de
+            // video: las constantes de imagen, calibradas con 300-700 tokens, se
+            // quedan cortas igual que se quedaban con video.
+            // With real audio the sequence is long even with ONE video frame: the
+            // image constants, calibrated on 300-700 tokens, fall as short as they
+            // did for video.
+            const esVideo = seq.latentFrames > 1 || seq.audioRows > 4;
             const nwConst  = esVideo ? M.NW_CONST_V   : M.NW_CONST;
             const nwPerTok = esVideo ? M.NW_PER_TOK_V : M.NW_PER_TOK;
             const blockGiB = esVideo ? M.BLOCK_GIB_V  : M.BLOCK_GIB;
-            const nonWeights = nwConst + nwPerTok * seq.total;             // GiB
+            // La recta se calibro contra los tokens que cuenta el entrenador en
+            // cache_sequence_tokens(), que son VIDEO + AUDIO y no incluyen el
+            // texto. Aqui se le metia seq.total, con los ~226 tokens del prompt
+            // dentro: 0,38 GiB de no-pesos inventados que la recta ya llevaba
+            // absorbidos en su constante. El signo del error era conservador -- de
+            // ahi que nadie lo notara en video -- pero las dos formulas tienen que
+            // comer lo MISMO o el pico que muestra la UI no es el que se mide.
+            //
+            // The line was fitted against the token count the trainer computes in
+            // cache_sequence_tokens(): VIDEO + AUDIO, no text. seq.total was being
+            // passed instead, carrying the ~226 prompt tokens -- 0.38 GiB of
+            // invented non-weights the line already had folded into its constant.
+            // The error leaned conservative, which is why video never showed it,
+            // but both formulas must eat the SAME number or the peak the UI shows
+            // is not the one that gets measured.
+            const modelTokens = seq.videoTokens + seq.audioRows;
+            const nonWeights = nwConst + nwPerTok * modelTokens;            // GiB
             const room = targetGiB - M.SLACK_GIB - nonWeights - M.BASE_GIB;
             let blocks = Math.floor(room / blockGiB);
             blocks = Math.max(0, Math.min(M.MAX_BLOCKS, blocks));
@@ -1343,8 +1425,18 @@
             // blocks. Adding the fixed 2.5 here while the trainer subtracts the
             // calibrated value (3.84 at 1,332 tokens) makes the UI plan 24 blocks
             // and the trainer deliver 20.
+            // El entrenador SUMA filas de audio a los tokens de video en
+            // cache_sequence_tokens(). Aqui se contaban solo los de video, asi que
+            // en un dataset de voz la UI calculaba el overhead sobre 1 token y el
+            // entrenador sobre 415. Las dos cifras tienen que salir de la MISMA
+            // secuencia o el reparto de bloques no coincide.
+            // The trainer ADDS audio rows to video tokens in
+            // cache_sequence_tokens(). Only video ones were counted here, so on a
+            // voice dataset the UI sized the overhead on 1 token and the trainer
+            // on 415. Both must come from the SAME sequence.
             const overheadGb = esVideo
-                ? Math.max(M.OVERHEAD, M.ACT_BASE_GB + M.ACT_PER_TOKEN_GB * seq.videoTokens)
+                ? Math.max(M.OVERHEAD,
+                           M.ACT_BASE_GB + M.ACT_PER_TOKEN_GB * modelTokens)
                 : M.OVERHEAD;
             const budget = Math.round((M.BASE_GB + blocks * M.BLOCK_GB + overheadGb) * 100) / 100;
             const fits = blocks > 0 && (targetGiB - peak) > 0;
