@@ -525,6 +525,19 @@
                         </div>
                     </div>
 
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Weight Decay:</label>
+                            <input type="number" step="0.00001" min="0" id="train_weight_decay"
+                                   value="0.0" title="Frena el DESPLAZAMIENTO de los pesos: en cada paso los empuja un poco hacia cero, asi que entrenar mas lejos cuesta mas. Importa aqui porque el modo en que se rompe este LoRA no es el sobreajuste normal, es la distancia recorrida: el timbre o el concepto mejoran cuanto mas se mueven los pesos, y lo que NO se entrena (el video en un dataset de voz, el prompt) se degrada sobre ese mismo eje. Bajar el LR no lo evita, solo tarda mas en llegar al mismo sitio; esto mueve el punto de cruce. 0 = desactivado. Un valor tipico es 1e-4. Sube el loss un poco: es lo esperado. / Brakes weight DISPLACEMENT: every step nudges the weights back toward zero, so travelling further costs more. It matters because this LoRA does not fail by ordinary overfitting but by distance travelled -- what IS trained improves the further the weights move, and what is NOT trained (the video branch on a voice dataset, prompt following) degrades along that same axis. Lowering the LR does not avoid it, it only takes longer to arrive; this moves the crossing point. 0 = off, 1e-4 is typical. It raises the loss slightly, which is expected.">
+                        </div>
+                        <div class="form-group">
+                            <label>Caption Dropout:</label>
+                            <input type="number" step="0.01" min="0" max="1" id="train_caption_dropout"
+                                   value="0.05" title="Fraccion de pasos que entrenan con el caption VACIO. 0,05 = uno de cada veinte. Conserva la capacidad de seguir el prompt: sin esto, una corrida larga aprende que la palabra clave esta siempre presente y deja de atender al resto del texto -- el fallo de 'tiene el timbre perfecto pero habla en un idioma raro'. Tambien es lo que mantiene el comportamiento sin prompt, del que depende el CFG en la generacion. 0 = desactivado; 0,05 es el valor por defecto y rara vez hace falta tocarlo. Por encima de ~0,15 el concepto tarda mucho mas en aprenderse. / Fraction of steps trained with an EMPTY caption. 0.05 = one in twenty. It preserves prompt following: without it a long run learns the trigger is always there and stops attending to the rest of the text -- the 'perfect timbre but speaking gibberish' failure. It also keeps the unconditional behaviour that CFG relies on at generation time. 0 = off; 0.05 is the default and rarely needs changing. Above ~0.15 the concept takes much longer to learn.">
+                        </div>
+                    </div>
+
                     <div class="form-row-3">
                         <div class="form-group">
                             <label>Save Every:</label>
@@ -1558,6 +1571,12 @@
                     if (t.lora_alpha) document.getElementById('train_lora_alpha').value = t.lora_alpha;
                     if (t.batch_size) document.getElementById('train_batch_size').value = t.batch_size;
                     if (t.grad_accum_steps) document.getElementById('train_grad_accum').value = t.grad_accum_steps;
+                    // !== undefined y no un truthy: 0 es un valor VALIDO en los dos, y es
+                    // ademas el de weight decay por defecto. Con `if (t.weight_decay)` un
+                    // preset que lo trajera a 0 dejaria el campo con lo que hubiera antes.
+                    // Not a truthy test: 0 is VALID for both and is weight decay's default.
+                    if (t.weight_decay !== undefined) document.getElementById('train_weight_decay').value = t.weight_decay;
+                    if (t.caption_dropout !== undefined) document.getElementById('train_caption_dropout').value = t.caption_dropout;
                     if (t.save_every) document.getElementById('train_save_every').value = t.save_every;
                     if (t.seed !== undefined) document.getElementById('train_seed').value = t.seed;
                     if (t.preview_caption_mode !== undefined) {
@@ -1659,6 +1678,8 @@
                     if (data.lora_alpha !== undefined) document.getElementById('train_lora_alpha').value = data.lora_alpha;
                     if (data.batch_size !== undefined) document.getElementById('train_batch_size').value = data.batch_size;
                     if (data.grad_accum_steps !== undefined) document.getElementById('train_grad_accum').value = data.grad_accum_steps;
+                    if (data.weight_decay !== undefined) document.getElementById('train_weight_decay').value = data.weight_decay;
+                    if (data.caption_dropout !== undefined) document.getElementById('train_caption_dropout').value = data.caption_dropout;
                     if (data.save_every !== undefined) document.getElementById('train_save_every').value = data.save_every;
                     if (data.seed !== undefined) document.getElementById('train_seed').value = data.seed;
                     if (data.preview_caption_mode !== undefined) {
@@ -1772,6 +1793,8 @@
                 lora_alpha: parseInt(document.getElementById('train_lora_alpha').value),
                 batch_size: parseInt(document.getElementById('train_batch_size').value),
                 grad_accum_steps: parseInt(document.getElementById('train_grad_accum').value),
+                weight_decay: parseFloat(document.getElementById('train_weight_decay').value) || 0.0,
+                caption_dropout: parseFloat(document.getElementById('train_caption_dropout').value) || 0.0,
                 save_every: parseInt(document.getElementById('train_save_every').value),
                 seed: parseInt(document.getElementById('train_seed').value),
 

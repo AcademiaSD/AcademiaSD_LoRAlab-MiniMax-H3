@@ -787,6 +787,15 @@ def bucket_size(width, height):
     return bw, bh
 
 
+# Captions que NO llevan la palabra clave estando configurada. No es un error
+# -- las anclas tienen que estar aqui -- pero si son TODOS, lo que pasa es que
+# se te olvido pasar "Apply to All", y eso es mejor verlo antes de entrenar.
+# Captions that do NOT carry the trigger word while one is configured. Not an
+# error -- anchors belong here -- but if it is ALL of them, you forgot to run
+# "Apply to All", which is much better seen before training.
+SIN_TRIGGER = []
+
+
 def read_prompt(base_name):
     """Return (prompt, had_caption_file) / Devuelve (prompt, habia_fichero_caption)."""
     path = os.path.join(DATASET_PATH, base_name + ".txt")
@@ -796,8 +805,35 @@ def read_prompt(base_name):
         had = True
         with open(path, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
-    if TRIGGER_WORD and TRIGGER_WORD.lower() not in prompt.lower():
-        prompt = "{}, {}".format(TRIGGER_WORD, prompt).strip(", ")
+    # EL TRIGGER SALE DEL CAPTION Y DE NINGUN OTRO SITIO.
+    #
+    # Aqui habia una linea que se lo ponia delante a toda muestra que no lo
+    # llevara. Comoda, y equivocada: convertia el caption en una sugerencia en
+    # vez de en la verdad, y no habia forma de decir "esta muestra NO lo lleva".
+    # Con eso las ANCLAS eran imposibles. Un ancla existe para dar gradiente
+    # propio a la rama de video mientras el audio mueve los pesos compartidos, y
+    # para eso tiene que representar al modelo SIN el concepto; si lleva la
+    # palabra clave deja de ser un ancla y pasa a ser un ejemplo mas de lo que se
+    # entrena. Se podia borrar del .txt las veces que se quisiera: volvia a
+    # aparecer aqui, sin decirlo, y la corrida entera se iba a la basura sin que
+    # nada en el log lo explicara.
+    #
+    # Ahora lo que ponga el caption es lo que se codifica. Para anadir la palabra
+    # a muchos captions de golpe esta "Apply to All" en el Dataset Manager, que
+    # ademas deja ver lo que va a quedar antes de escribirlo.
+    #
+    # THE TRIGGER COMES FROM THE CAPTION AND FROM NOWHERE ELSE. A line here used
+    # to prepend it to every sample lacking it -- convenient, and wrong: it made
+    # the caption a suggestion rather than the truth, with no way to say "this
+    # sample does NOT carry it", which made ANCHORS impossible. An anchor has to
+    # represent the model WITHOUT the concept; carrying the trigger turns it into
+    # one more example of what is being trained. You could delete it from the
+    # .txt as often as you liked and it came back here, silently, wasting the run
+    # with nothing in the log to explain it. What the caption says is now what
+    # gets encoded; "Apply to All" in the Dataset Manager is the place to add the
+    # word to many captions at once, and it shows the result before writing it.
+    if TRIGGER_WORD and prompt and TRIGGER_WORD.lower() not in prompt.lower():
+        SIN_TRIGGER.append(base_name)
     return prompt, had
 
 
@@ -2852,8 +2888,12 @@ def preprocess_minimaxh3():
         elif not prompt.strip():
             empty_caption.append(filename)
 
+    sin_trigger = sorted(set(SIN_TRIGGER))
     DIAG["dataset"] = {
         "num_images": len(images),
+        "trigger_word": TRIGGER_WORD,
+        "captions_without_trigger": len(sin_trigger),
+        "captions_without_trigger_first": sin_trigger[:15],
         "missing_caption": len(missing_caption),
         "missing_caption_first": missing_caption[:15],
         "empty_caption": len(empty_caption),
@@ -2864,6 +2904,40 @@ def preprocess_minimaxh3():
     log_dev(L("[DATASET] Images: {} | without .txt: {} | empty caption: {}",
               "[DATASET] Imagenes: {} | sin .txt: {} | caption vacio: {}")
             .format(len(images), len(missing_caption), len(empty_caption)))
+
+    # El trigger ya no se inyecta, asi que si falta en TODOS los captions el
+    # LoRA no va a tener con que asociarse y no habria nada en el log que lo
+    # dijera. Si falta en algunos, son las anclas y esta bien.
+    # The trigger is no longer injected, so if it is missing from EVERY caption
+    # the LoRA has nothing to attach to and nothing in the log would say so.
+    # Missing from some of them means anchors, which is fine.
+    # Se imprime SIEMPRE que haya palabra clave configurada, tambien cuando el
+    # reparto es el correcto. Un aviso que solo aparece cuando algo va mal deja
+    # el caso bueno indistinguible de "no se ha ejecutado la comprobacion", y esa
+    # duda cuesta mas que las dos lineas de log que ahorra.
+    # Printed WHENEVER a trigger word is configured, including when the split is
+    # right. A warning that only shows on failure makes the good case
+    # indistinguishable from "the check never ran", and that doubt costs more
+    # than the two log lines it saves.
+    if TRIGGER_WORD:
+        cuantos, total = len(sin_trigger), len(images)
+        log_error(L(
+            "[DATASET] Trigger word '{}': {}/{} captions carry it, {} do not.",
+            "[DATASET] Palabra clave '{}': {}/{} captions la llevan, {} no.")
+            .format(TRIGGER_WORD, total - cuantos, total, cuantos))
+    if TRIGGER_WORD and sin_trigger:
+        log_error(L(
+            "[DATASET] {}/{} captions do not contain the trigger word '{}'. The trigger is "
+            "taken from the captions ONLY -- nothing is added automatically -- so these train "
+            "without it. That is exactly right for ANCHOR samples and wrong for everything "
+            "else: if this is all of them, run 'Apply to All' in the Dataset Manager first. "
+            "First: {}",
+            "[DATASET] {}/{} captions no contienen la palabra clave '{}'. El trigger se toma "
+            "SOLO de los captions -- no se anade nada automaticamente -- asi que estas "
+            "entrenan sin el. Eso es justo lo que se quiere en las muestras ANCLA y un error "
+            "en las demas: si son todas, pasa antes 'Apply to All' en el Dataset Manager. "
+            "Primeras: {}")
+            .format(cuantos, total, TRIGGER_WORD, ", ".join(sin_trigger[:8])))
 
     if missing_caption or empty_caption:
         msg = ("{} images have no caption file and {} have an empty caption. Training on empty "

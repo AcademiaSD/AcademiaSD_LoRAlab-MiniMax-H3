@@ -263,7 +263,7 @@ L:\MyDataset\
 └── subject02.txt
 ```
 
-Use the **Dataset Manager** to review everything: caption badges, a lightbox to edit any `.txt`, a trash icon per image, and **+ Trigger All** to inject your trigger word everywhere at once.
+Use the **Dataset Manager** to review everything: caption badges, a lightbox to edit any `.txt`, a trash icon per image, and **Apply to All** to add your trigger word, or a description common to the whole dataset, to every caption at once -- appending, replacing or removing.
 
 **No captions yet?** Press **Create Captions**. It writes one `.txt` per image with the trigger word first, and turns into **Redo Captions** once they exist (asking before it overwrites anything).
 
@@ -378,11 +378,42 @@ cap while reproducing the trained voice.
 | :--- | ---: | ---: | ---: | ---: |
 | audio only | 0 | 8 | 600 | 0.412 |
 | audio only | 0 | 8 | 1000 | 0.343 (prompt lost) |
-| **anchored** | **30 varied** | **16** | **1000** | **0.240** |
+| **anchored** | **30 varied clips** | **16** | **1000** | **0.240** |
+| anchored | 24 stills + 6 clips | 16 | 1000 | video dark and static |
 
 Rank matters here for a specific reason: with rank 8 the timbre can only be
 represented by moving each weight a long way, and that movement is what breaks
 the conditioning. Rank 16 fits the same timbre with less displacement.
+
+**Anchors have to be clips, not stills.** Replacing 24 of the 30 anchors with
+their own first frames is forty times cheaper per step -- 36 tokens against
+1,476 -- and it made the result worse in every respect: dark, black-dominant
+output and strange static framing, with the prompt followed but the shots wrong.
+An image is one latent frame, which is not a short video but a degenerate
+temporal case, and spending 24 of 30 anchor steps there costs more than the
+compute it saves. Two plausible explanations were measured and ruled out first:
+the first frames were not darker than their clips (+0.0 Y average), and the
+black filler frames of audio-only samples are correctly excluded from the video
+loss.
+
+If the anchors are too expensive, shorten them instead of flattening them. 39
+frames sits on the 17n+5 grid and costs 432 tokens against a 124-frame clip's
+1,476, while keeping the temporal signal intact. This is worth more than it
+looks: the dataset's LARGEST sample sets the VRAM peak, so long anchors are paid
+for on every step of the run, not only on their own.
+
+#### Two settings that move the threshold
+
+`lr x steps` predicts where a run crosses from trained to broken -- around 0.26
+with 30 varied anchors at rank 16, and around 0.22 without them. Lowering the
+learning rate does not avoid the crossing; it only takes longer to arrive.
+Two settings change where the crossing sits rather than when it is reached, and
+both are in the training panel:
+
+| Setting | Default | What it does |
+| :--- | ---: | :--- |
+| **Weight Decay** | `0.0` | Nudges every trained weight back toward zero on each step, so travelling further costs more. This LoRA does not fail by ordinary overfitting but by distance travelled, which is precisely the axis this brakes. `1e-4` is a reasonable first value; it raises the loss slightly, which is expected. |
+| **Caption Dropout** | `0.05` | Trains one step in twenty with an empty caption, preserving prompt following and the unconditional behaviour that CFG relies on at generation time. Already on by default -- it is documented because turning it off is how you reproduce the "perfect timbre, gibberish speech" failure on purpose. Above ~0.15 the concept takes much longer to learn. |
 
 ### 3. Pre-Cache
 
@@ -394,6 +425,22 @@ the conditioning. Rank 16 fits the same timbre with less displacement.
 This loads the Qwen3-VL-32B text encoder once, writes the layer-50 embeddings and VAE latents to disk, and releases everything. It also runs self-tests (RoPE liveness, prompt discrimination, latent statistics) and writes a full `_diagnostics.json`.
 
 Re-running the pre-cache **skips images already cached**, so it is cheap to run again after changing a custom preview prompt.
+
+**The trigger word comes from the captions and from nowhere else.** The
+pre-cache used to prepend it to every caption that lacked one, which was
+convenient and wrong: it made the caption a suggestion rather than the truth,
+and there was no way to say "this sample does not carry it". That made anchors
+impossible -- you could delete the word from an anchor's `.txt` as often as you
+liked and it reappeared, silently, wasting the run with nothing in the log to
+explain it. Use **Apply to All** in the Dataset Manager to add it in bulk
+instead. The pre-cache reports the split:
+
+```
+[DATASET] Trigger word '4cdm1asdv0z': 69/99 captions carry it, 30 do not.
+```
+
+Missing from some of them is what anchors look like. Missing from all of them
+means Apply to All was never run, and the LoRA will have nothing to attach to.
 
 ### 4. Train
 
