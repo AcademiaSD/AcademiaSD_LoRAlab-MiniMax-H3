@@ -1003,7 +1003,32 @@ def serve_dataset_image(filename):
     # necesita <video> para poder buscar dentro del clip sin descargarlo entero.
     # conditional=True enables range requests (HTTP 206), which <video> needs to
     # seek inside the clip without downloading all of it.
-    return send_from_directory(str(dataset_dir), requested.name, conditional=True)
+    resp = send_from_directory(str(dataset_dir), requested.name, conditional=True)
+
+    # SIN ESTA CABECERA EL NAVEGADOR NO PREGUNTA.
+    #
+    # send_from_directory manda ETag y Last-Modified pero ningun Cache-Control, y
+    # ante esa ausencia el navegador aplica cache HEURISTICA: estima la frescura
+    # como una fraccion del tiempo transcurrido desde el Last-Modified. Con un
+    # fichero de hace un ano eso son semanas dandolo por bueno SIN revalidar.
+    # Resultado: separabas la voz, el fichero cambiaba en disco, y el reproductor
+    # seguia sonando con musica. Parecia que la separacion no habia hecho nada.
+    #
+    # "no-cache" no significa "no lo guardes", significa "preguntame antes de
+    # usarlo". El navegador sigue guardandolo y sigue recibiendo 304 mientras no
+    # cambie, asi que no cuesta ancho de banda: solo deja de adivinar.
+    #
+    # WITHOUT THIS HEADER THE BROWSER DOES NOT ASK. send_from_directory sends
+    # ETag and Last-Modified but no Cache-Control, and in its absence browsers
+    # apply HEURISTIC caching: freshness is guessed as a fraction of the age
+    # since Last-Modified. On a year-old file that is weeks of serving from cache
+    # WITHOUT revalidating -- so separating the voice changed the file on disk
+    # while the player kept playing the music, and the operation looked like a
+    # no-op. "no-cache" does not mean "do not store", it means "ask me first":
+    # the copy is still cached and still answered with 304 while unchanged, so it
+    # costs no bandwidth. It just stops guessing.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/api/save-caption", methods=["POST"])
