@@ -74,6 +74,51 @@ app = Flask(__name__)
 active_process = None
 active_script = None
 process_lock = threading.Lock()
+
+# LOG DE TAREAS QUE CORREN DENTRO DEL SERVIDOR.
+#
+# El terminal de la interfaz lee la salida del SUBPROCESO de turno (pre-cache,
+# entrenamiento). Las tareas que corren dentro de Flask -- separar la voz, y su
+# descarga de 600 MB -- no tienen subproceso, asi que sus print acababan en la
+# consola del servidor, donde el usuario no esta mirando: desde la interfaz la
+# operacion parecia colgada durante varios minutos sin decir nada.
+#
+# Esto es una cola circular que la interfaz sondea. No sustituye a la salida del
+# subproceso, convive con ella.
+#
+# LOG FOR TASKS THAT RUN INSIDE THE SERVER. The UI terminal reads the current
+# SUBPROCESS's output. Tasks running inside Flask -- vocal separation, and its
+# 600 MB download -- have no subprocess, so their prints landed in the server
+# console where nobody is looking: from the UI the operation looked hung for
+# several minutes without a word. This is a ring buffer the UI polls; it
+# coexists with the subprocess output rather than replacing it.
+TAREA_LOG = []
+TAREA_LOG_LOCK = threading.Lock()
+TAREA_LOG_MAX = 500
+
+
+def log_tarea(msg):
+    """Anade una linea al log de tareas y la imprime tambien en el servidor."""
+    texto = str(msg)
+    print(texto, flush=True)
+    with TAREA_LOG_LOCK:
+        seq = (TAREA_LOG[-1][0] + 1) if TAREA_LOG else 1
+        TAREA_LOG.append((seq, texto))
+        if len(TAREA_LOG) > TAREA_LOG_MAX:
+            del TAREA_LOG[:len(TAREA_LOG) - TAREA_LOG_MAX]
+
+
+@app.route("/api/task-log")
+def task_log():
+    """Lineas nuevas desde `since`. / Lines newer than `since`."""
+    try:
+        desde = int(request.args.get("since", 0) or 0)
+    except Exception:
+        desde = 0
+    with TAREA_LOG_LOCK:
+        nuevas = [t for n, t in TAREA_LOG if n > desde]
+        ultimo = TAREA_LOG[-1][0] if TAREA_LOG else 0
+    return jsonify({"lines": nuevas, "last": ultimo})
 output_buffer = []
 output_buffer_lock = threading.Lock()
 
@@ -909,8 +954,17 @@ def dataset_info():
                         caption = txt_path.read_text(encoding="utf-8").strip()
                     except Exception:
                         pass
+                try:
+                    mtime = int(file_path.stat().st_mtime)
+                except Exception:
+                    mtime = 0
                 images.append({
                     "file": file_path.name,
+                    # Va a la URL como ?v=, para que reemplazar un fichero en su
+                    # sitio invalide la cache del navegador.
+                    # Goes into the URL as ?v= so replacing a file in place
+                    # invalidates the browser cache.
+                    "mtime": mtime,
                     "kind": kind_of(file_path),
                     "has_audio": (_has_audio(file_path)
                                   if kind_of(file_path) == "video" else None),
@@ -926,6 +980,15 @@ def dataset_info():
     })
 
 
+# Sin esto, reemplazar un fichero EN SU SITIO -- que es lo que hacen Extract
+# Vocals y Prepare Clips -- no se veia: el nombre no cambia, luego la URL no
+# cambia, luego el navegador sirve el de su cache y la miniatura y el reproductor
+# siguen mostrando el audio anterior. Parecia que la operacion no habia hecho
+# nada cuando si la habia hecho.
+# Without this, replacing a file IN PLACE -- which is what Extract Vocals and
+# Prepare Clips do -- was invisible: same name, same URL, so the browser serves
+# its cached copy and the thumbnail and player keep the previous audio. The
+# operation looked like it had done nothing when it had.
 @app.route("/api/dataset-image/<path:filename>")
 def serve_dataset_image(filename):
     dataset_dir = get_dataset_dir()
@@ -1434,15 +1497,47 @@ def extract_vocals():
         if not dataset_dir.is_dir():
             return jsonify({"status": "error", "error": "No dataset folder / No hay dataset"}), 404
 
-        muestras = [f for f in sorted(dataset_dir.iterdir())
-                    if f.is_file() and f.suffix.lower() in AUDIO_EXTS]
+        # LOS CLIPS DE VIDEO TAMBIEN CUENTAN.
+        #
+        # Antes solo se miraban los ficheros de audio sueltos, y el caso de uso
+        # que motivo todo esto es justo el contrario: trocear una pelicula deja
+        # cien .mp4 con dialogo sobre musica y efectos, que es exactamente el
+        # material que hay que separar. Con la lista vacia el endpoint devolvia
+        # "0 ficheros" y quedaba como si la separacion no funcionara, cuando lo
+        # que pasaba es que no habia mirado donde estaba el audio.
+        #
+        # VIDEO CLIPS COUNT TOO. Only standalone audio files were considered, and
+        # the use case that motivated this is the opposite: splitting a film
+        # leaves a hundred .mp4 with dialogue over music and effects, which is
+        # precisely the material to separate. With an empty list the endpoint
+        # answered "0 files" and looked broken, when it had simply not looked
+        # where the audio was.
+        muestras = []
+        sin_pista = 0
+        for f in sorted(dataset_dir.iterdir()):
+            if not f.is_file():
+                continue
+            ext = f.suffix.lower()
+            if ext in AUDIO_EXTS:
+                muestras.append(f)
+            elif ext in VIDEO_EXTS:
+                # Un clip mudo no tiene nada que separar y remuxearlo solo
+                # perderia calidad. / A mute clip has nothing to separate.
+                if _has_audio(f):
+                    muestras.append(f)
+                else:
+                    sin_pista += 1
         if not muestras:
             return jsonify({"status": "ok", "processed": 0,
-                            "message": "No audio files / No hay ficheros de audio"})
+                            "message": ("Nothing with an audio track in the dataset "
+                                        "({} mute clips). / Nada con pista de audio en el "
+                                        "dataset ({} clips mudos).".format(sin_pista, sin_pista))})
 
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        modelo = sep.cargar(str(BASE_DIR / "MelBandRoFormer"), device, log=print)
+        log_tarea("[VOCALS] Device: {} | model folder: ./MelBandRoFormer".format(device))
+        log_tarea("[VOCALS] {} file(s) to process / ficheros a procesar".format(len(muestras)))
+        modelo = sep.cargar(str(BASE_DIR / "MelBandRoFormer"), device, log=log_tarea)
         if modelo is None:
             return jsonify({"status": "error",
                             "error": "Could not load the separation model. / "
@@ -1459,11 +1554,44 @@ def extract_vocals():
                 voz = sep.separar_voz(modelo, pcm, device)
 
                 backup.mkdir(exist_ok=True)
+                es_video = m.suffix.lower() in VIDEO_EXTS
                 tmp = backup / ("__vocals__" + m.name)
-                sep.escribir_pcm(voz, tmp, ffmpeg)
+
+                if es_video:
+                    # La imagen se COPIA, no se recodifica: separar la voz no
+                    # tiene por que costar una generacion de calidad de video.
+                    # Solo se sustituye la pista, y -shortest evita que un
+                    # desajuste de milisegundos alargue el clip y lo saque de la
+                    # rejilla 17n+5.
+                    # The picture is COPIED, not re-encoded: separating the voice
+                    # should not cost a video generation. Only the track is
+                    # replaced, and -shortest keeps a few milliseconds of drift
+                    # from lengthening the clip off the 17n+5 grid.
+                    pista = backup / ("__vocals__" + m.stem + ".wav")
+                    sep.escribir_pcm(voz, pista, ffmpeg)
+                    r = subprocess.run(
+                        [ffmpeg, "-v", "error", "-y", "-i", str(m), "-i", str(pista),
+                         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                         "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp)],
+                        capture_output=True, text=True, timeout=1800)
+                    try:
+                        pista.unlink()
+                    except Exception:
+                        pass
+                    if r.returncode != 0 or not tmp.is_file():
+                        errores.append("{}: remux fallo / remux failed -- {}"
+                                       .format(m.name, (r.stderr or "").strip()[:160]))
+                        continue
+                else:
+                    sep.escribir_pcm(voz, tmp, ffmpeg)
+
                 shutil.move(str(m), str(backup / m.name))
                 shutil.move(str(tmp), str(m))
-                hechos.append("{} ({:.1f}s)".format(m.name, pcm.shape[1] / sep.SR))
+                hechos.append("{} ({:.1f}s{})".format(
+                    m.name, pcm.shape[1] / sep.SR, ", video" if es_video else ""))
+                log_tarea("[VOCALS] {}/{}  {}  ({:.1f}s{})".format(
+                    len(hechos) + len(errores), len(muestras), m.name,
+                    pcm.shape[1] / sep.SR, ", video" if es_video else ""))
             except Exception as exc:
                 errores.append("{}: {}".format(m.name, exc))
 

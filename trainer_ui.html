@@ -1774,6 +1774,17 @@
             const res = await fetch('/api/save-precache', { method: 'POST', body: JSON.stringify(precacheData) });
             const data = await res.json();
             if (data.status === 'ok') {
+                // Guardar puede haber cambiado dataset_path, la resolucion o los
+                // fotogramas, y de ahi salen tanto la lista de muestras como el plan
+                // de VRAM. Sin releer, la interfaz sigue mostrando el dataset anterior
+                // y un presupuesto calculado sobre la geometria vieja.
+                // Saving may have changed dataset_path, the resolution or the frame
+                // count, and both the sample list and the VRAM plan come from those.
+                try { loadDatasetInfo(); } catch (e) {}
+                try {
+                    const perfil = document.getElementById('train_vram_profile');
+                    if (perfil && perfil.value) applyVramProfile(perfil.value);
+                } catch (e) {}
                 const listStr = data.all_saved ? data.all_saved.join('\n • ') : data.file;
                 alert(`✓ Pre-Cache Settings saved / Configuración Pre-Caché guardada en:\n • ${listStr}`);
             }
@@ -2216,7 +2227,7 @@
                 card.className = 'ds-card';
                 card.onclick = (ev) => {
                     if (ev.target.closest('.ds-del')) return;
-                    openModal(`/api/dataset-image/${img.file}`, img.file, img.caption || '', esVideo, esAudio);
+                    openModal(mediaUrl(img), img.file, img.caption || '', esVideo, esAudio);
                 };
                 
                 const hasCaption = img.has_txt && img.caption && img.caption.trim().length > 0;
@@ -2233,11 +2244,11 @@
                 const medio = esAudio
                     ? `<div class="ds-audio">
                            <img class="ds-audio-icon" src="/assets/audio_solo.png" alt="audio">
-                           <audio src="/api/dataset-image/${img.file}" controls preload="metadata"></audio>
+                           <audio src="${mediaUrl(img)}" controls preload="metadata"></audio>
                        </div>`
                     : esVideo
-                    ? `<video src="/api/dataset-image/${img.file}#t=0.1" muted loop playsinline preload="metadata"></video>`
-                    : `<img src="/api/dataset-image/${img.file}" alt="${img.file}">`;
+                    ? `<video src="${mediaUrl(img)}#t=0.1" muted loop playsinline preload="metadata"></video>`
+                    : `<img src="${mediaUrl(img)}" alt="${img.file}">`;
 
                 // has_audio llega en null cuando el servidor no sondeo (dataset
                 // grande) o cuando el fichero no es un clip: en ese caso no se
@@ -2319,6 +2330,37 @@
             } catch (e) { alert('Error: ' + e); }
         }
 
+        // La URL lleva el mtime del fichero. Reemplazar un audio EN SU SITIO no
+        // cambia su nombre, asi que sin esto el navegador seguia sirviendo el de
+        // su cache y parecia que Extract Vocals no habia hecho nada. Con el mtime
+        // dentro, la URL cambia solo cuando el fichero cambia: se refresca lo que
+        // toca y se sigue cacheando lo que no.
+        // The URL carries the file's mtime. Replacing a file IN PLACE does not
+        // change its name, so without this the browser kept serving its cached
+        // copy and Extract Vocals looked like a no-op. With the mtime in the URL
+        // it changes only when the file does: what changed refreshes, what did
+        // not stays cached.
+        function mediaUrl(img) {
+            const v = (img && img.mtime) ? ('?v=' + img.mtime) : '';
+            return '/api/dataset-image/' + encodeURIComponent(img.file) + v;
+        }
+
+        // Vuelca en el terminal las lineas que las tareas de dentro del servidor
+        // van dejando, mientras la peticion sigue abierta.
+        // Drains the lines that in-server tasks leave while the request is open.
+        let tareaLogSeq = 0;
+        async function seguirTaskLog(activo) {
+            while (activo()) {
+                try {
+                    const r = await fetch('/api/task-log?since=' + tareaLogSeq);
+                    const d = await r.json();
+                    (d.lines || []).forEach(function (l) { appendTerminal(l); });
+                    if (d.last) tareaLogSeq = d.last;
+                } catch (e) { /* el servidor esta ocupado; se reintenta */ }
+                await new Promise(function (r) { setTimeout(r, 1000); });
+            }
+        }
+
         async function extractVocals() {
             const msg = 'Separate voice from music in every audio file?\n\n'
                       + '\u00bfSeparar la voz de la m\u00fasica en todos los audios?\n\n'
@@ -2335,9 +2377,12 @@
             appendTerminal('[VOCALS] ' + new Date().toLocaleTimeString()
                            + ' - separating, this takes a while / separando, tarda un rato...',
                            false, 'term-warning');
+            let enCurso = true;
+            seguirTaskLog(function () { return enCurso; });
             try {
                 const res = await fetch('/api/extract-vocals', { method: 'POST' });
                 const data = await res.json();
+                enCurso = false;
                 if (data.status === 'error') {
                     appendTerminal('[VOCALS] ' + (data.error || 'unknown'), false, 'term-danger');
                     alert('Error: ' + (data.error || 'unknown'));
@@ -2351,6 +2396,7 @@
             } catch (e) {
                 alert('Error: ' + e);
             } finally {
+                enCurso = false;
                 if (btn) { btn.disabled = false; btn.innerText = prev; }
             }
         }
