@@ -394,7 +394,7 @@
                     <div class="form-group">
                         <label>Dataset Path / Ruta del Dataset:</label>
                         <div style="display:flex; gap:8px;">
-                            <input type="text" id="dataset_path" value="./dataset" onchange="loadDatasetInfo()">
+                            <input type="text" id="dataset_path" value="./dataset" onchange="loadDatasetInfo(); try { refmodDefaults(); } catch (e) {}">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="browseFolderNative('dataset')">Browse / Explorar</button>
                         </div>
                     </div>
@@ -1885,6 +1885,7 @@
                 // Saving may have changed dataset_path, the resolution or the frame
                 // count, and both the sample list and the VRAM plan come from those.
                 try { loadDatasetInfo(); } catch (e) {}
+                try { refmodDefaults(); } catch (e) {}
                 try {
                     const perfil = document.getElementById('train_vram_profile');
                     if (perfil && perfil.value) applyVramProfile(perfil.value);
@@ -2498,10 +2499,39 @@
         // Fills only EMPTY fields from panels 1 and 3. It never overwrites what
         // the user typed: this is a default, not a binding -- overwriting would
         // silently wipe a hand-picked reference folder when the dataset changes.
+        // Lo ULTIMO que puso aqui el automatismo, por campo. Es lo que distingue
+        // "el usuario no ha tocado esto" de "el usuario escribio justo esto".
+        // What the automation last wrote in each field. This is what tells
+        // "untouched" apart from "the user typed exactly this".
+        const refmodAuto = {};
+
         function refmodDefaults() {
+            // SEGUIR AL DATASET SIN PISAR LO ESCRITO A MANO.
+            //
+            // La primera version solo rellenaba campos VACIOS, para no borrar sin
+            // avisar una carpeta de referencias elegida a mano. Evitaba ese fallo
+            // y creaba otro: al cambiar de dataset el campo se quedaba apuntando
+            // al anterior, en silencio, que es peor porque parece correcto.
+            //
+            // Con recordar el ultimo valor que puso el automatismo se tienen las
+            // dos cosas: si el campo sigue teniendo ESE valor, nadie lo ha tocado
+            // y se actualiza; si tiene otro, lo escribio el usuario y se respeta.
+            // Un campo vacio tambien se rellena, como antes.
+            //
+            // FOLLOW THE DATASET WITHOUT OVERWRITING HAND-TYPED VALUES. The first
+            // version only filled EMPTY fields, so as not to silently wipe a
+            // hand-picked reference folder. That avoided one bug and created
+            // another: on changing dataset the field kept pointing at the old one,
+            // silently -- worse, because it looks right. Remembering what the
+            // automation last wrote gives both: if the field still holds THAT
+            // value nobody touched it and it updates; anything else was typed by
+            // the user and is left alone.
             const pon = function (id, valor) {
                 const el = document.getElementById(id);
-                if (el && !el.value && valor) el.value = valor;
+                if (!el || !valor) return;
+                if (el.value && el.value !== refmodAuto[id]) return;   // escrito a mano
+                el.value = valor;
+                refmodAuto[id] = valor;
             };
             const ds = (document.getElementById('dataset_path') || {}).value || '';
             const proj = ((document.getElementById('project_name') || {}).value || '').trim();

@@ -47,6 +47,7 @@ This trainer takes **images, video clips, or both in the same folder**. Images t
 * **Adjustable block swap**: transformer blocks are parked outside VRAM and streamed in just in time, with a **hard cap** (`set_per_process_memory_fraction`) so the process physically cannot exceed its budget. This is what lets you *simulate* a smaller card and know whether a run would fit on 12 GB before you own one.
 
 * **Frozen weights never travel home** (`nf4_cpu_home`): the NF4 weights are read-only, so once a block's CPU-side bytes exist they stay valid forever. The swap uploads them and then simply releases the GPU copy, instead of downloading 0.28 GB back over PCIe every time — which, at ~94 block evictions per step, was **26 GB of pointless PCIe traffic and 94 allocate/free cycles per step**. Removing it **halved the step time on every profile** and cut system RAM from 28.8 GB to 17.1 GB on a 16 GB card. Those CPU-side bytes are the memory-mapped checkpoint itself, so the trainer's hard RAM requirement is **2.2 GB**; the rest is file-backed and the OS can reclaim it.
+* **RefMods without training**: the same VAEs encode reference stills into a `models/refmods` file that ComfyUI attends to as a native reference. No weights move, so it cannot cause the audio/video collapse a trained LoRA can — and it cannot teach anything new either. Seconds instead of hours; the cost is paid in tokens on every generation afterwards.
 * **Zero VRAM spent on encoders**: during training **neither the text encoder nor the VAE are loaded**. Every embedding and latent is computed once, offline, in the pre-cache stage.
 * **fp32 LoRA weights and optimizer state**: deliberately *not* 8-bit. On H3 the per-parameter LoRA gradients are tiny; `AdamW8bit` quantizes `exp_avg_sq` (squared gradients ~1e-6) and destroys exactly the low-magnitude components where facial detail lives. The result is a LoRA that gets pose, hair and framing right and leaves the face soft. fp32 costs ~6 bytes/param and fixes it.
 
@@ -478,6 +479,82 @@ For **Custom** prompts: type the prompt, save the **Pre-Cache** JSON and re-run 
 ### 6. Export
 
 Enter a **Final LoRA Filename**, pick your `models/loras` folder, and click **🚀 Send to Models**. The saved file uses the original MiniMax-H3 checkpoint key names and loads directly in ComfyUI.
+
+---
+
+## 🧬 RefMod — a reference, not a LoRA
+
+The green panel at the bottom of the column is not step 7. It is a **branch off
+the dataset** that skips the pre-cache entirely, which is why it is unnumbered:
+no captions, no trigger word, no 32B text encoder. Only the VAEs, which this
+project already loads. Seconds instead of hours.
+
+A RefMod **changes no weights**. It is a pre-encoded VAE latent appended to the
+conditioning's `refs`, which the DiT attends to through every block exactly like
+a reference image. Two things follow, and they are the whole trade:
+
+* It **cannot** cause the audio/video collapse described above, because nothing
+  moves. There is no threshold to cross.
+* It **cannot teach anything new**. It can only point the model at something it
+  already knows how to represent. A LoRA changes what the model *is*; a RefMod
+  changes what it is *looking at*.
+
+And it is not free at generation time. Its tokens join the sequence the DiT
+attends over on **every step of every render, forever**, where a trained LoRA
+costs nothing at inference. Attention cost grows with the square of the
+sequence, so an oversized mod slows down everything you generate afterwards.
+
+### What to feed it
+
+The defaults come from the published corpus, not from reasoning. All **1,480
+RefMods** on `malcolmrey/minimaxh3` are `kind=video` built from many varied
+**stills** — 22 at 512 px (5,632 tokens) or 8 at 1024 px (8,192). None is built
+from video clips, and **none carries audio**.
+
+| Setting | Default | Why |
+| :--- | ---: | :--- |
+| Extract | `Video / Image` | Audio is a dead end here — see below. |
+| Visual tokens | `5632` | One token covers 32×32 real pixels: a 512² still is 256 tokens, so this is 22 of them. |
+| Resolution | `1024` | Short edge, downscale only. Set **512** to reproduce the 22-still pattern; at 1024 the same budget buys about five stills. |
+| Concept type | `identity` | Stored in the mod and read back by the loader. |
+
+The budget is a ceiling, not a target: four images produce a four-frame mod, not
+a padded one. Mixed folders are fine — each pass takes only what it can use, so
+a stray `.mp3` is ignored by the visual pass and the images by the audio one.
+
+Output goes straight to `models/refmods`. There is no export step because there
+is nothing to convert: the file the encoder writes **is** the file ComfyUI loads.
+
+### Audio: use the native node instead
+
+An audio RefMod is written correctly — its latent decodes back to the source
+voice at **0.97** time correlation and **0.99** spectral — and it still does not
+work. It becomes a standalone `audio` ref block that the model places on its own
+temporal cursor, bound to no identity, and the generated voice does not resemble
+the reference.
+
+H3's real audio reference path is the **native `MiniMaxH3ReferenceToVideo`
+node**:
+
+* `ref_audios.ref_audio_0` for a voice on its own (it needs a Trim node wired to
+  `duration`).
+* `ref_videos.ref_video_N` **paired by index** with
+  `ref_video_audios.ref_video_audio_N`, which emits the `video_audio` block where
+  sound and picture share one temporal origin.
+
+That pairing is the binding a RefMod cannot express: its `ref_block()` always
+writes `ref_audio_t: 0` and `audio_latent: None` for anything visual. The native
+node also declares its references **at tokenize time**
+(`clip.tokenize(prompt, minimax_ref_items=...)`), so the text encoder knows they
+exist; a RefMod is injected afterwards, with the text conditioning already
+closed.
+
+> **Note on a third-party extractor.** `ComfyUI-MiniMaxH3Mod`'s
+> `snap_to_causal_grid` trims reference videos to `4k+1`, claiming H3's video VAE
+> is causal. ComfyUI's own core node does `while n % 17 != 5: n -= 1` — the
+> **17n+5** grid this project uses everywhere. Video refmods extracted with that
+> script are mis-trimmed; stills are unaffected, which is the pattern the whole
+> published corpus uses anyway.
 
 ---
 
