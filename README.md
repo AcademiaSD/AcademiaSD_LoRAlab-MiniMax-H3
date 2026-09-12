@@ -484,10 +484,10 @@ Enter a **Final LoRA Filename**, pick your `models/loras` folder, and click **�
 
 ## 🧬 RefMod — a reference, not a LoRA
 
-The green panel at the bottom of the column is not step 7. It is a **branch off
-the dataset** that skips the pre-cache entirely, which is why it is unnumbered:
-no captions, no trigger word, no 32B text encoder. Only the VAEs, which this
-project already loads. Seconds instead of hours.
+The green panel under panel 3 in the interface is not a fourth step. It is a
+**branch off the dataset** that skips the pre-cache entirely, which is why it
+carries no number: no captions, no trigger word, no 32B text encoder. Only the
+VAEs, which this project already loads. Seconds instead of hours.
 
 A RefMod **changes no weights**. It is a pre-encoded VAE latent appended to the
 conditioning's `refs`, which the DiT attends to through every block exactly like
