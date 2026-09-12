@@ -1463,6 +1463,153 @@ def _split_points(duracion, ventana, minimo, silencios):
     return cortes, duros
 
 
+@app.route("/api/extract-refmod", methods=["POST"])
+def extract_refmod():
+    """Codifica las referencias en un RefMod y lo guarda donde ComfyUI lo lee.
+
+    NO ES UN ENTRENAMIENTO Y NO SE PARECE A UNO. No se carga el DiT, no hay
+    gradientes y no se modifica ningun peso: se codifican unas referencias con
+    los VAEs y se guarda el latente. Por eso tarda segundos en vez de horas, y
+    por eso no puede romper la rama de video como si hace entrenar audio -- un
+    RefMod no mueve pesos, solo le da al DiT algo mas a lo que atender.
+    A cambio, sus tokens se pagan en cada paso de cada generacion, para siempre.
+
+    Va EN PROCESO, no como subproceso, igual que Extract Vocals: los dos VAEs
+    juntos son un par de GB frente a los 39 del DiT, y asi el progreso sale por
+    el canal de log de tareas que ya alimenta el terminal.
+
+    NOT A TRAINING RUN AND NOT LIKE ONE: no DiT, no gradients, no weight is
+    modified -- the references are encoded with the VAEs and the latent is
+    saved. Seconds instead of hours, and it cannot break the video branch the
+    way training audio does, because it moves no weights. In exchange its tokens
+    are paid on every step of every generation.
+    """
+    try:
+        if get_status().get("running"):
+            return jsonify({"status": "error",
+                            "error": "A process is running. Stop it first. / "
+                                     "Hay un proceso en marcha. Detenlo primero."}), 409
+
+        data = request.get_json(force=True) or {}
+        nombre = str(data.get("name", "")).strip()
+        if not nombre:
+            return jsonify({"status": "error",
+                            "error": "The mod needs a name. / El mod necesita un nombre."}), 400
+        # El campo de la interfaz lleva la extension para ser coherente con el
+        # del panel de export, pero los sufijos _audio/_visual van ANTES de
+        # ella: sin quitarla saldria "x.safetensors_audio.safetensors".
+        # The UI field carries the extension to match the export panel, but the
+        # _audio/_visual suffixes go BEFORE it.
+        if nombre.lower().endswith(".safetensors"):
+            nombre = nombre[: -len(".safetensors")]
+
+        kind = str(data.get("kind", "both")).lower()
+        if kind not in ("audio", "visual", "both"):
+            return jsonify({"status": "error", "error": "kind must be audio/visual/both"}), 400
+
+        origen = str(data.get("source", "")).strip()
+        carpeta = Path(origen) if origen else get_dataset_dir()
+        if not carpeta.is_dir():
+            return jsonify({"status": "error",
+                            "error": "Source folder not found / No existe la carpeta: "
+                                     "{}".format(carpeta)}), 404
+
+        salida = str(data.get("output", "")).strip()
+        destino = Path(salida) if salida else (BASE_DIR / "refmods")
+
+        import sys
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        import refmod
+
+        fuentes = [str(f) for f in sorted(carpeta.iterdir())
+                   if f.is_file() and f.suffix.lower() in
+                   (refmod.IMAGE_EXTS + refmod.VIDEO_EXTS + refmod.AUDIO_EXTS)]
+        if not fuentes:
+            return jsonify({"status": "error",
+                            "error": "No media in {} / No hay material en esa carpeta"
+                                     .format(carpeta)}), 404
+
+        res = int(data.get("resolution", 1024) or 1024)
+        tok_a = int(data.get("max_tokens_audio", 400) or 0)
+        tok_v = int(data.get("max_tokens_visual", 1024) or 0)
+        concepto = str(data.get("concept_type", "generic")).strip() or "generic"
+        descripcion = str(data.get("description", "")).strip()
+
+        log_tarea("[REFMOD] {} fichero(s) en {}".format(len(fuentes), carpeta))
+        log_tarea("[REFMOD] modo encode | tipo {} | salida {}".format(concepto, destino))
+
+        P = refmod.precache()
+        escritos, detalles = [], []
+        import torch
+
+        try:
+            if kind in ("audio", "both"):
+                log_tarea("[REFMOD] cargando el VAE de audio / loading the audio VAE...")
+                avae = P.load_h3_audio_vae(P.NF4_MODEL_ID)
+                if avae is None:
+                    detalles.append("audio: no hay audio_vae/ en el modelo, se omite")
+                else:
+                    lat, usados = refmod.extraer_audio(fuentes, avae, tok_a, log=log_tarea)
+                    del avae
+                    if lat is None:
+                        detalles.append("audio: ninguna fuente traia pista de audio")
+                    else:
+                        ruta = refmod.guardar(
+                            lat, "audio", nombre + "_audio",
+                            str(destino / (nombre + "_audio")),
+                            source="audio", source_shape="x".join(str(x) for x in lat.shape),
+                            description=descripcion, concept_type="voice",
+                            tags=usados[:4])
+                        n = refmod.token_count(lat, "audio")
+                        escritos.append(ruta)
+                        detalles.append("audio: {} tokens ({:.2f} s) -> {}"
+                                        .format(n, n / 80.0, ruta))
+
+            if kind in ("visual", "both"):
+                log_tarea("[REFMOD] cargando el VAE de video / loading the video VAE...")
+                vvae = refmod.preparar_video_vae(
+                    P.load_h3_video_vae(P.NF4_MODEL_ID, P.MODEL_ID, strict=False))
+                lat, usados = refmod.extraer_visual(fuentes, vvae, res, tok_v, log=log_tarea)
+                del vvae
+                if lat is None:
+                    detalles.append("visual: ninguna fuente era imagen o video")
+                else:
+                    tipo = "image" if int(lat.shape[2]) == 1 else "video"
+                    ruta = refmod.guardar(
+                        lat, tipo, nombre + "_visual",
+                        str(destino / (nombre + "_visual")),
+                        source="stack" if len(usados) > 1 else tipo,
+                        source_shape=" +".join(usados[:6]),
+                        pool="full-res {}x{}px".format(int(lat.shape[4]) * 16,
+                                                       int(lat.shape[3]) * 16),
+                        description=descripcion, concept_type=concepto,
+                        tags=usados[:4])
+                    n = refmod.token_count(lat, tipo)
+                    escritos.append(ruta)
+                    detalles.append("visual: {} tokens ({} latentes de {}x{}) -> {}"
+                                    .format(n, lat.shape[2], lat.shape[3], lat.shape[4], ruta))
+        finally:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        for d in detalles:
+            log_tarea("[REFMOD] " + d)
+        if not escritos:
+            return jsonify({"status": "error",
+                            "error": "Nothing was written. / No se escribio nada. "
+                                     + " | ".join(detalles)}), 400
+        return jsonify({"status": "ok", "files": escritos, "details": detalles,
+                        "message": "{} fichero(s) escrito(s) / file(s) written"
+                                   .format(len(escritos))})
+    except Exception as exc:
+        import traceback
+        log_tarea("[REFMOD][ERROR] " + traceback.format_exc().strip().splitlines()[-1])
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/api/extract-vocals", methods=["POST"])
 def extract_vocals():
     """Separa la voz de la musica y los efectos en todas las muestras con audio.

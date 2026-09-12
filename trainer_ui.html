@@ -61,6 +61,16 @@
         /* Títulos desplegables / Collapsible Panels */
         .panel-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 12px; color: #f1f5f9; border-bottom: 1px solid var(--panel-border); padding-bottom: 8px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; transition: color 0.15s; }
         .panel-title:hover { color: #38bdf8; }
+        /* RefMod lleva fondo propio a proposito. No es decoracion: es el unico
+           bloque de la columna que NO pertenece a la secuencia 1-2-3, y antes de
+           tener color habia que leer el titulo para darse cuenta. El verde lo
+           separa de un vistazo sin romper el tema oscuro. / RefMod gets its own
+           background on purpose: it is the only block in the column that is NOT
+           part of the 1-2-3 sequence, and without colour you had to read the
+           title to notice. */
+        .panel-refmod { background: #0f2a1d; border-color: #1f6f43; }
+        .panel-refmod .panel-title { color: #6ee7a8; border-bottom-color: #1f6f43; }
+        .panel-refmod .panel-title:hover { color: #a7f3cf; }
         .panel.collapsed .panel-title { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
         .panel.collapsed .panel-body { display: none; }
         .toggle-icon { font-size: 0.75rem; color: var(--text-muted); font-weight: bold; }
@@ -820,6 +830,95 @@
                     <button type="button" class="btn btn-warning btn-tall btn-full" onclick="sendToModels()" style="margin-top:5px;">
                         <span class="main-text">🚀 Send to Models</span>
                         <span class="sub-text">Enviar a Models</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- RefMod: SIN NUMERO, y es deliberado.
+                 Los paneles 1-2-3 son el camino del LoRA y se hacen en ese orden.
+                 RefMod no es un paso mas: es una RAMA que sale del dataset y se
+                 salta la pre-cache entera -- no usa captions, ni palabra clave, ni
+                 el codificador de texto de 32B, solo el VAE. Numerarlo lo pondria
+                 en una secuencia a la que no pertenece y la gente lo buscaria
+                 antes de entrenar. El numero solo hace falta cuando el orden
+                 importa, y aqui es "o una cosa o la otra".
+                 RefMod is deliberately UNNUMBERED. Panels 1-2-3 are the LoRA path,
+                 done in that order. This is a BRANCH off the dataset that skips the
+                 pre-cache entirely -- no captions, no trigger word, no 32B text
+                 encoder, just the VAE. A number would imply a sequence it is not
+                 part of. -->
+            <div class="panel panel-refmod collapsed">
+                <div class="panel-title" onclick="togglePanel(this)">
+                    <span>RefMod / Referencia directa &mdash; sin entrenamiento</span>
+                    <span class="toggle-icon">▼</span>
+                </div>
+
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label>Source folder / Carpeta de referencias:</label>
+                        <input type="text" id="refmod_source" value="" placeholder="(dataset)" title="Folder with the reference files. It defaults to your dataset, but a RefMod wants a HANDFUL of references, not a training set: pointing it at 99 samples produces an enormous mod that the token budget then guts anyway. Make a small folder with your best two or three takes. / Carpeta con los ficheros de referencia. Por defecto es tu dataset, pero un RefMod quiere UN PUNADO de referencias, no un set de entrenamiento: apuntarlo a 99 muestras produce un mod enorme que luego el presupuesto de tokens destroza igualmente. Haz una carpeta pequena con tus dos o tres mejores tomas.">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Mod name / Nombre del mod:</label>
+                        <input type="text" id="refmod_name" value="" placeholder="mi_referencia">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Output / Carpeta de salida (models/refmods):</label>
+                        <div style="display:flex; gap:8px;"><input type="text" id="refmod_output" value="" title="Where the .safetensors lands. Point it straight at ComfyUI's models/refmods and the mod shows up in the Load H3 RefMods dropdown with no copying -- that is why RefMod has no separate export step the way the LoRA does: there is nothing to convert, the file the encoder writes IS the file ComfyUI loads. Empty = ./refmods inside the project. With 'both', two files are written: name_audio and name_visual. / Donde aterriza el .safetensors. Apuntalo directamente a models/refmods de ComfyUI y el mod aparece en el desplegable de Load H3 RefMods sin copiar nada -- por eso RefMod no tiene un paso de export aparte como el LoRA: no hay nada que convertir, el fichero que escribe el codificador ES el que carga ComfyUI. Vacio = ./refmods dentro del proyecto. Con 'ambos' se escriben dos ficheros: name_audio y name_visual."
+                               placeholder="C:/ComfyUI/models/refmods">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="browseFolderNative('refmod')">Browse / Explorar</button>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Extract / Extraer:</label>
+                            <select id="refmod_kind" onchange="refmodEstimate()" title="What gets encoded. A RefMod is not a LoRA: it changes no weights, it hands the DiT a pre-encoded reference it attends to through every block. USE THIS FOR IMAGE, NOT FOR VOICE -- and that is a measured conclusion, not a preference. An audio RefMod becomes a standalone 'audio' ref block that the model places on its own temporal cursor, unbound to any identity: the file is correct (its latent decodes back to the source voice at 0.97 correlation) but the generated voice does not resemble it. H3's real audio reference path is the NATIVE MiniMaxH3ReferenceToVideo node: its ref_audios input for a voice alone, or ref_videos + ref_video_audios paired by index, which emits the 'video_audio' block where sound and picture share one temporal origin -- the binding a RefMod cannot express. The native node also declares its references at tokenize time (minimax_ref_items), so the text encoder knows they exist; a RefMod is injected afterwards, when the text conditioning is already closed. Of the 1,480 RefMods published on HuggingFace, not one carries audio. / Que se codifica. Un RefMod no es un LoRA: no cambia ningun peso, le entrega al DiT una referencia ya codificada que atiende en todos los bloques. USALO PARA IMAGEN, NO PARA VOZ, y es una conclusion medida, no una preferencia. Un RefMod de audio se convierte en un bloque 'audio' suelto que el modelo coloca en su propio cursor temporal, sin atar a ninguna identidad: el fichero es correcto (su latente decodificado da la voz original con correlacion 0,97) pero la voz generada no se le parece. El camino real del audio en H3 es el nodo NATIVO MiniMaxH3ReferenceToVideo: su entrada ref_audios para la voz sola, o ref_videos + ref_video_audios emparejados por numero, que emite el bloque 'video_audio' donde sonido e imagen comparten origen temporal -- la union que un RefMod no puede expresar. El nodo nativo ademas declara sus referencias al tokenizar el prompt (minimax_ref_items), asi que el codificador de texto sabe que existen; un RefMod se inyecta despues, con el condicionamiento de texto ya cerrado. De los 1.480 RefMods publicados en HuggingFace, ninguno lleva audio.">
+                                <option value="audio">Audio</option>
+                                <option value="visual" selected>Video / Image</option>
+                                <option value="both">Both / Ambos</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Concept type / Tipo:</label>
+                            <select id="refmod_concept" title="What the reference represents. Stored in the mod and read back by the loader. 'identity' is a specific person or character, 'style' a look or grade rather than a concrete subject, 'generic' anything else. On the audio pass the type is always 'voice'. / Que representa la referencia. Se guarda en el mod y el cargador lo lee. 'identity' es una persona o personaje concreto, 'style' un look o etalonaje mas que un sujeto, 'generic' cualquier otra cosa. En la pasada de audio el tipo es siempre 'voice'.">
+                                <option value="identity" selected>identity</option>
+                                <option value="style">style</option>
+                                <option value="generic">generic</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row-3">
+                        <div class="form-group">
+                            <label>Audio tokens:</label>
+                            <input type="number" id="refmod_tokens_audio" value="400" min="0" step="80"
+                                   oninput="refmodEstimate()" title="Token budget for the audio mod. Audio latents run at 40 per second and channel, and a token is two of them, so this is 80 TOKENS PER SECOND: 400 = 5 s. These tokens are not a one-off cost -- they join the sequence the DiT attends over on EVERY step of EVERY generation, so a long voice reference makes all your renders slower (attention cost grows with the square of the sequence). Five seconds is plenty: you are encoding how a voice SOUNDS, not what it says. / Presupuesto de tokens del mod de audio. Los latentes de audio van a 40 por segundo y canal, y un token son dos, asi que esto son 80 TOKENS POR SEGUNDO: 400 = 5 s. No es un coste de una vez: estos tokens entran en la secuencia que el DiT atiende en CADA paso de CADA generacion, asi que una referencia de voz larga ralentiza todos tus renders (el coste de la atencion crece con el cuadrado de la secuencia). Cinco segundos sobran: estas codificando como SUENA una voz, no lo que dice.">
+                        </div>
+                        <div class="form-group">
+                            <label>Visual tokens:</label>
+                            <input type="number" id="refmod_tokens_visual" value="5632" min="0" step="256"
+                                   oninput="refmodEstimate()" title="Token budget for the visual mod. One token covers 32x32 real pixels: a 512x512 still is 256 tokens, a 1024x1024 one is 1,024. The default comes from the published corpus rather than from theory -- 1,480 RefMods on HuggingFace, sampled headers showing 22 stills at 512px (5,632 tokens) or 8 at 1024px (8,192). Identity is built from MANY VARIED STILLS, not from video frames. Spend the budget either way: few sharp frames or many small ones. Beware that this is paid on every step of every generation -- a 192x192 clip of 124 frames is only 1,332 tokens, so a 5,632 token mod is four times the video you generate, and attention cost grows with the square of the sequence. Over budget, near-duplicate frames are dropped first and the rest resampled. / Presupuesto de tokens del mod visual. Un token cubre 32x32 pixeles reales: una imagen de 512x512 son 256 tokens y una de 1024x1024 son 1.024. El valor por defecto sale del corpus publicado, no de la teoria: 1.480 RefMods en HuggingFace, y las cabeceras muestreadas dan 22 stills a 512px (5.632 tokens) u 8 a 1024px (8.192). La identidad se construye con MUCHAS IMAGENES FIJAS VARIADAS, no con fotogramas de video. El presupuesto se gasta de las dos formas: pocos fotogramas nitidos o muchos pequenos. Ojo, esto se paga en cada paso de cada generacion -- un clip de 192x192 y 124 fotogramas son solo 1.332 tokens, asi que un mod de 5.632 es cuatro veces el video que generas, y el coste de la atencion crece con el cuadrado de la secuencia. Si te pasas, primero se tiran los fotogramas casi duplicados y el resto se remuestrea.">
+                        </div>
+                        <div class="form-group">
+                            <label>Resolution / Resolución:</label>
+                            <input type="number" id="refmod_resolution" value="1024" min="128" step="64"
+                                   title="Short edge of the reference before encoding, and it only DOWNSCALES -- it never enlarges. This is NOT the training resolution from panel 1: there you train at 192 or 256 because the cost is per step and there are thousands of steps, here the encode happens ONCE, so detail is cheap and 1024 is the sensible default. Identity lives in that detail. What you watch here is the token count, not this number. / Lado corto de la referencia antes de codificar, y solo REDUCE, nunca amplia. NO es la resolucion de entrenamiento del panel 1: alli entrenas a 192 o 256 porque el coste es por paso y son miles de pasos, aqui el encode se hace UNA vez, asi que el detalle sale barato y 1024 es el valor sensato. La identidad vive en ese detalle. Lo que hay que vigilar aqui es el recuento de tokens, no este numero.">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Description / Descripción (opcional):</label>
+                        <input type="text" id="refmod_description" value="" title="Optional text describing the concept ('a ginger woman with messy hair', 'an animation style'). It is stored inside the mod and the ComfyUI loaders emit it so it can be concatenated onto the prompt without retyping it. / Texto opcional que describe el concepto. Se guarda dentro del mod y los cargadores de ComfyUI lo emiten para concatenarlo al prompt sin reescribirlo."
+                               placeholder="a ginger woman with messy hair">
+                    </div>
+
+                    <div id="refmod_estimate" style="font-size:0.78rem; color:#94a3b8; padding:2px 2px 8px;"></div>
+
+                    <button type="button" class="btn btn-primary" onclick="createRefmod()">
+                        Create RefMod / Crear RefMod
                     </button>
                 </div>
             </div>
@@ -1614,6 +1713,7 @@
                     if (t.export_final_name) document.getElementById('export_final_name').value = t.export_final_name;
                 }
                 updateProjectPaths();
+                refmodDefaults();
                 loadDatasetInfo();
                 loadCaptionSettings();
             } catch (e) {}
@@ -1733,6 +1833,8 @@
             let currentPath = '';
             if (target === 'dataset') currentPath = document.getElementById('dataset_path').value;
             else if (target === 'export') currentPath = document.getElementById('export_models_dir').value;
+            else if (target === 'refmod') currentPath = document.getElementById('refmod_output').value
+                                                     || refmodOutputSugerido();
 
             try {
                 const res = await fetch('/api/select-folder', {
@@ -1748,6 +1850,8 @@
                         loadDatasetInfo();
                     } else if (target === 'export') {
                         document.getElementById('export_models_dir').value = data.path;
+                    } else if (target === 'refmod') {
+                        document.getElementById('refmod_output').value = data.path;
                     }
                 } else if (data.status === 'error') {
                     openFolderBrowserWeb(target, currentPath);
@@ -2361,6 +2465,130 @@
             }
         }
 
+        // ====================================================================
+        // REFMOD
+        //
+        // Traduce el presupuesto de tokens a algo fisico, que es lo unico que
+        // el usuario puede juzgar. "400 tokens" no dice nada; "5,0 s de voz" si.
+        // Las dos conversiones salen de core.py del nodo:
+        //   audio  : token_count = 2 * latent_t, y latent_t = 40/s  -> 80 tok/s
+        //   visual : token_count = t * (h/2) * (w/2) sobre un latente /16
+        //            -> un token cubre 32x32 pixeles reales
+        // Translates the token budget into something physical, the only thing a
+        // person can judge: "400 tokens" says nothing, "5.0 s of voice" does.
+        // Both conversions come from the node's core.py.
+        // ====================================================================
+        // La carpeta de refmods de ComfyUI vive al lado de la de loras, asi que
+        // la de export ya sabe donde esta: basta cambiar el ultimo tramo. Si el
+        // usuario no ha rellenado esa, no se inventa nada y se deja vacio, que el
+        // backend resuelve como ./refmods dentro del proyecto.
+        // ComfyUI's refmods folder sits next to the loras one, so the export path
+        // already knows where it is: only the last segment changes. If that is
+        // empty nothing is invented -- the backend resolves empty as ./refmods.
+        function refmodOutputSugerido() {
+            const loras = (document.getElementById('export_models_dir') || {}).value || '';
+            if (!loras) return '';
+            return loras.replace(/[\\/]+$/, '').replace(/(lora|loras)$/i, 'refmods');
+        }
+
+        // Rellena lo que este VACIO desde el panel 1 y el 3. Nunca pisa lo que
+        // haya escrito el usuario: esto es un valor por defecto, no una
+        // sincronizacion -- si sobrescribiera, cambiar el dataset borraria una
+        // carpeta de referencias elegida a mano sin avisar.
+        // Fills only EMPTY fields from panels 1 and 3. It never overwrites what
+        // the user typed: this is a default, not a binding -- overwriting would
+        // silently wipe a hand-picked reference folder when the dataset changes.
+        function refmodDefaults() {
+            const pon = function (id, valor) {
+                const el = document.getElementById(id);
+                if (el && !el.value && valor) el.value = valor;
+            };
+            const ds = (document.getElementById('dataset_path') || {}).value || '';
+            const proj = ((document.getElementById('project_name') || {}).value || '').trim();
+            pon('refmod_source', ds);
+            pon('refmod_name', proj ? proj + '_refmod.safetensors' : '');
+            pon('refmod_output', refmodOutputSugerido());
+            refmodEstimate();
+        }
+
+        function refmodEstimate() {
+            const el = document.getElementById('refmod_estimate');
+            if (!el) return;
+            const kind = document.getElementById('refmod_kind').value;
+            const ta = parseInt(document.getElementById('refmod_tokens_audio').value) || 0;
+            const tv = parseInt(document.getElementById('refmod_tokens_visual').value) || 0;
+            const partes = [];
+            if (kind !== 'visual' && ta > 0) {
+                partes.push(`audio ${ta} tok = ${(ta / 80).toFixed(1)} s de voz / of voice`);
+            }
+            if (kind !== 'audio' && tv > 0) {
+                const px = Math.round(Math.sqrt(tv) * 32);
+                partes.push(`visual ${tv} tok = una imagen de ~${px}\u00d7${px} / one ~${px}\u00d7${px} image`);
+            }
+            const total = (kind !== 'visual' ? ta : 0) + (kind !== 'audio' ? tv : 0);
+            // La referencia se paga en CADA generacion, asi que compararla con lo
+            // que se genera es mas util que el numero suelto.
+            // The reference is paid on EVERY generation, so comparing it with what
+            // you generate is more useful than the bare number.
+            partes.push(`<b>${total}</b> tok a\u00f1adidos a cada generaci\u00f3n / added to every generation`);
+            el.innerHTML = partes.join(' &nbsp;\u00b7&nbsp; ');
+        }
+
+        async function createRefmod() {
+            const cuerpo = {
+                source: document.getElementById('refmod_source').value.trim(),
+                name: document.getElementById('refmod_name').value.trim(),
+                kind: document.getElementById('refmod_kind').value,
+                concept_type: document.getElementById('refmod_concept').value,
+                max_tokens_audio: parseInt(document.getElementById('refmod_tokens_audio').value) || 0,
+                max_tokens_visual: parseInt(document.getElementById('refmod_tokens_visual').value) || 0,
+                resolution: parseInt(document.getElementById('refmod_resolution').value) || 1024,
+                description: document.getElementById('refmod_description').value.trim(),
+                output: document.getElementById('refmod_output').value.trim()
+            };
+            if (!cuerpo.name) { alert('Pon un nombre al mod. / Name the mod first.'); return; }
+
+            const btn = event && event.target ? event.target : null;
+            const prev = btn ? btn.innerText : '';
+            if (btn) { btn.disabled = true; btn.innerText = '...'; }
+            let enCurso = true;
+            seguirTaskLog(function () { return enCurso; });
+            appendTerminal('[REFMOD] ' + new Date().toLocaleTimeString()
+                           + ' - encoding / codificando...', false, 'term-warning');
+            try {
+                const res = await fetch('/api/extract-refmod', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cuerpo)
+                });
+                enCurso = false;
+                // El endpoint puede no existir todavia, y Flask responde a eso con
+                // HTML: res.json() reventaria con un error de parseo que no explica
+                // nada. Mejor decir lo que pasa.
+                // The endpoint may not exist yet and Flask answers that with HTML,
+                // so res.json() would throw a parse error explaining nothing.
+                if (!res.ok && res.status === 404) {
+                    appendTerminal('[REFMOD] /api/extract-refmod no existe todavia en el servidor '
+                                   + '/ not implemented on the server yet', false, 'term-danger');
+                    alert('El backend de RefMod todavia no esta. / The RefMod backend is not there yet.');
+                    return;
+                }
+                const data = await res.json();
+                if (data.status === 'error') {
+                    appendTerminal('[REFMOD] ' + (data.error || 'unknown'), false, 'term-danger');
+                    alert('Error: ' + (data.error || 'unknown'));
+                    return;
+                }
+                (data.details || []).forEach(function (x) { appendTerminal('   ' + x, false, 'term-success'); });
+                appendTerminal('[REFMOD] ' + (data.message || 'done / hecho'), false, 'term-success');
+            } catch (e) {
+                alert('Error: ' + e);
+            } finally {
+                enCurso = false;
+                if (btn) { btn.disabled = false; btn.innerText = prev; }
+            }
+        }
+
         async function extractVocals() {
             const msg = 'Separate voice from music in every audio file?\n\n'
                       + '\u00bfSeparar la voz de la m\u00fasica en todos los audios?\n\n'
@@ -2956,6 +3184,8 @@
                 loadDatasetInfo();
             } else if (currentBrowserTarget === 'export') {
                 document.getElementById('export_models_dir').value = browserPath;
+            } else if (currentBrowserTarget === 'refmod') {
+                document.getElementById('refmod_output').value = browserPath;
             }
             closeFolderModal();
         }
