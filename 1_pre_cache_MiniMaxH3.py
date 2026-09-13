@@ -703,8 +703,43 @@ print("", flush=True)
 # ============================================================================
 def ensure_nf4_model_exists(nf4_model_id, repo_id="AcademiaSD/MiniMax-H3-NF4"):
     """Download the NF4 repo if the local folder is missing or empty.
-    Descarga el repo NF4 si la carpeta local no existe o esta vacia."""
-    if not os.path.exists(nf4_model_id) or not os.path.isdir(nf4_model_id) or not os.listdir(nf4_model_id):
+    Descarga el repo NF4 si falta alguna de sus partes."""
+    # SE COMPRUEBA POR CARPETA, NO POR "NO ESTA VACIA".
+    #
+    # Antes bastaba con que el directorio existiera y tuviera algo dentro. Eso
+    # daba por bueno un modelo descargado A MEDIAS, y hay dos formas normales de
+    # acabar asi: una descarga de 41 GB interrumpida, o haber pulsado "Crear
+    # RefMod" antes de pre-cachear nada -- asegurar_vaes() crea esta misma
+    # carpeta con SOLO los VAE dentro, 5,8 GB de 41.
+    #
+    # En ambos casos la pre-cache escribia "[OK] Carpeta NF4 encontrada", no
+    # descargaba nada mas, y el fallo aparecia mucho despues y en otro sitio:
+    # "No se encontro la cache NF4 del transformer", al lanzar el entrenamiento.
+    # Un mensaje que no dice lo que pasa ni como arreglarlo.
+    #
+    # CHECKED PER FOLDER, not by "not empty". A directory that merely existed
+    # with something in it passed, which accepts a HALF-downloaded model -- an
+    # interrupted 41 GB fetch, or pressing "Create RefMod" before ever
+    # pre-caching, since asegurar_vaes() creates this same folder with only the
+    # VAEs in it. Either way the pre-cache said "NF4 folder found", downloaded
+    # nothing, and the failure surfaced much later and somewhere else: "NF4
+    # transformer cache not found" when starting training.
+    # OJO AL PLURAL: el repo NF4 guarda el DiT en "transformers/", no en
+    # "transformer/". Comprobar solo el singular daria "falta" sobre una
+    # instalacion perfecta y dispararia una descarga inutil en cada arranque.
+    # MIND THE PLURAL: the NF4 repo keeps the DiT in "transformers/", not
+    # "transformer/". Checking only the singular would report a perfectly good
+    # install as incomplete and trigger a useless download on every start.
+    partes = (("transformers", "transformer"), ("text_encoder",), ("vae",))
+    faltan = [alt[0] for alt in partes
+              if not any(os.path.isdir(os.path.join(nf4_model_id, c)) for c in alt)]
+    if faltan and os.path.isdir(nf4_model_id) and os.listdir(nf4_model_id):
+        log_dev(L("[DOWNLOAD] Incomplete NF4 model: missing {}. Resuming the download; "
+                  "what is already there is not fetched again.",
+                  "[DOWNLOAD] Modelo NF4 incompleto: falta(n) {}. Se reanuda la descarga; "
+                  "lo que ya esta no se vuelve a bajar.")
+                .format(", ".join(faltan)))
+    if faltan:
         log_dev("")
         log_dev("=" * 90)
         log_dev(L("[DOWNLOAD] NF4 folder missing or empty: {}",

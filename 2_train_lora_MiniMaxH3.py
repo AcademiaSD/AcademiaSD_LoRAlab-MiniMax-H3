@@ -2245,13 +2245,59 @@ def repair_precision_critical_modules(transformer, orig_dir):
     return len(fixed)
 
 
+def asegurar_transformer_nf4(nf4_cache_dir, repo_id="AcademiaSD/MiniMax-H3-NF4"):
+    """Descarga el transformer NF4 si no esta. Devuelve True si acabo disponible.
+
+    EL ENTRENADOR NO DESCARGABA NADA. Si la carpeta del modelo estaba a medias
+    -- una descarga de 41 GB interrumpida, o "Crear RefMod" pulsado antes de
+    pre-cachear, que crea esa carpeta con solo los VAE -- aqui se lanzaba un
+    FileNotFoundError y se acababa la historia. El mensaje decia donde habia
+    mirado, pero no que el problema se arregla solo volviendo a descargar, asi
+    que el usuario no tenia forma de saber que hacer.
+
+    Descarga unicamente transformer/: si el resto del modelo esta, no se vuelve
+    a bajar, y snapshot_download reanuda lo que ya hubiera a medias.
+
+    THE TRAINER DOWNLOADED NOTHING. A half-present model folder -- an interrupted
+    41 GB fetch, or "Create RefMod" pressed before pre-caching, which creates
+    that folder holding only the VAEs -- raised FileNotFoundError and that was
+    that. The message said where it had looked but not that the problem fixes
+    itself by downloading again. Only transformer/ is fetched, and
+    snapshot_download resumes whatever was already partly there.
+    """
+    if _find_transformer_cache_dir(nf4_cache_dir) is not None:
+        return True
+    log_print("=" * 90, flush=True)
+    log_print("[DOWNLOAD] Falta el transformer NF4 en {}. Descargando desde {} "
+              "(~33 GB). / NF4 transformer missing; downloading (~33 GB)."
+              .format(os.path.abspath(nf4_cache_dir), repo_id), flush=True)
+    log_print("=" * 90, flush=True)
+    try:
+        from huggingface_hub import snapshot_download
+        os.makedirs(nf4_cache_dir, exist_ok=True)
+        snapshot_download(repo_id=repo_id, local_dir=nf4_cache_dir,
+                          allow_patterns=["transformers/*", "transformer/*"])
+    except Exception as exc:
+        log_print("[DOWNLOAD][ERROR] No se pudo descargar: {} / download failed"
+                  .format(exc), flush=True)
+    return _find_transformer_cache_dir(nf4_cache_dir) is not None
+
+
 def load_transformer_from_nf4(nf4_cache_dir):
     _mem_bytes = {"quantized": 0, "unquantized": 0, "other": 0}
 
+    asegurar_transformer_nf4(nf4_cache_dir)
     cache_dir = _find_transformer_cache_dir(nf4_cache_dir)
     if cache_dir is None:
         raise FileNotFoundError(
-            "No se encontró la caché NF4 del transformer en: {}".format(nf4_cache_dir)
+            "No se encontro el transformer NF4 en: {}\n"
+            "La descarga automatica tambien fallo. Comprueba tu conexion y el "
+            "espacio libre (el modelo completo son ~41 GB), o borra esa carpeta "
+            "y vuelve a lanzar la Pre-Cache para bajarlo entero.\n"
+            "NF4 transformer not found and the automatic download also failed. "
+            "Check your connection and free space (~41 GB for the full model), "
+            "or delete that folder and run the Pre-Cache again."
+            .format(os.path.abspath(nf4_cache_dir))
         )
 
     log_print("[NF4] Cache dir detectado: {}".format(cache_dir), flush=True)
