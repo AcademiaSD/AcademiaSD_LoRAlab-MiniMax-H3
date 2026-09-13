@@ -2230,12 +2230,93 @@ def disable_final_norm(text_encoder):
 # ============================================================================
 # VAE LOADING / CARGA DE VAEs
 # ============================================================================
+# Los DOS UNICOS prefijos del repo que contienen VAEs, y lo que pesa cada uno.
+#
+# ensure_nf4_model_exists() de aqui arriba solo mira si la carpeta existe y no
+# esta vacia, asi que no detecta que FALTE una parte: con el modelo descargado y
+# el VAE borrado a mano, la descarga no se dispara y la carga revienta con un
+# FileNotFoundError que no dice que se puede arreglar solo. Esto lo comprueba por
+# fichero.
+#
+# Ademas permite lo contrario: bajarse SOLO los VAEs. Un RefMod no carga el DiT,
+# asi que quien solo quiera extraer referencias no tiene por que descargar los
+# 41 GB del repo -- y los dos VAEs no cuestan lo mismo, de ahi que se pidan por
+# separado.
+#
+# ensure_nf4_model_exists() above only checks that the folder exists and is not
+# empty, so it cannot notice a MISSING part: with the model downloaded and the
+# VAE deleted by hand, nothing is fetched and loading fails with a
+# FileNotFoundError that does not say it is self-repairable. This checks per
+# file -- and allows the opposite too: fetching ONLY the VAEs, since a RefMod
+# never loads the DiT and the two VAEs do not cost the same.
+PATRON_VAE_VIDEO = "vae/*"
+PATRON_VAE_AUDIO = "audio_vae/*"
+GB_VAE_VIDEO = 5.2
+GB_VAE_AUDIO = 0.6
+
+
+def vaes_presentes(nf4_model_id):
+    """(hay_video, hay_audio). Mismas rutas que busca load_h3_video_vae."""
+    video = any(os.path.isfile(os.path.join(nf4_model_id, *tramo)) for tramo in (
+        ("vae", "minimax_h3_video_vae.safetensors"),
+        ("vae", "minimax_h3_video_vae_fp16.safetensors"),
+        ("minimax_h3_video_vae.safetensors",),
+        ("minimax_h3_video_vae_fp16.safetensors",),
+    ))
+    audio = os.path.isfile(os.path.join(nf4_model_id, "audio_vae", "config.json"))
+    return video, audio
+
+
+def asegurar_vaes(nf4_model_id, video=True, audio=True,
+                  repo_id="AcademiaSD/MiniMax-H3-NF4", log=None):
+    """Descarga los VAEs que falten, y SOLO esos. Devuelve (hay_video, hay_audio).
+
+    No lanza excepcion si falla: devuelve lo que haya y decide el llamante. Un
+    fallo de red bajando el VAE de audio no tiene por que tumbar un trabajo
+    visual que no lo necesitaba.
+
+    Downloads the missing VAEs and only those, returning what is available
+    rather than raising: a network failure fetching the audio VAE should not take
+    down visual work that never needed it.
+    """
+    decir = log or (lambda m: log_dev(m))
+    hay_video, hay_audio = vaes_presentes(nf4_model_id)
+    faltan = []
+    if video and not hay_video:
+        faltan.append((PATRON_VAE_VIDEO, "video VAE", GB_VAE_VIDEO))
+    if audio and not hay_audio:
+        faltan.append((PATRON_VAE_AUDIO, "audio VAE", GB_VAE_AUDIO))
+    if not faltan:
+        return hay_video, hay_audio
+
+    total = sum(g for _, _, g in faltan)
+    nombres = ", ".join(n for _, n, _ in faltan)
+    decir("[VAE] Falta(n) {} en {} -- descargando ~{:.1f} GB de {}. / Missing {}; "
+          "downloading ~{:.1f} GB from {}."
+          .format(nombres, os.path.abspath(nf4_model_id), total, repo_id,
+                  nombres, total, repo_id))
+    try:
+        from huggingface_hub import snapshot_download
+        os.makedirs(nf4_model_id, exist_ok=True)
+        snapshot_download(repo_id=repo_id, local_dir=nf4_model_id,
+                          allow_patterns=[pat for pat, _, _ in faltan])
+        decir("[VAE] Descarga completada. / Download complete.")
+    except Exception as exc:
+        decir("[VAE][ERROR] No se pudo descargar: {} / download failed".format(exc))
+    return vaes_presentes(nf4_model_id)
+
+
 def load_vaes(nf4_model_id):
     log_dev("")
     log_dev("=" * 90)
     log_dev(L("[VAE-H3] Loading the reference H3 VIDEO VAE",
               "[VAE-H3] Cargando el VIDEO VAE H3 de referencia"))
     log_dev("=" * 90)
+    # Se pide el de audio tambien cuando toca, para no hacer dos descargas
+    # seguidas si el usuario borro los dos. / The audio VAE is requested too when
+    # relevant, so deleting both does not cause two separate downloads.
+    asegurar_vaes(nf4_model_id, video=True,
+                  audio=bool(WRITE_AUDIO_LATENT and ENCODE_AUDIO))
     return load_h3_video_vae(nf4_model_id, MODEL_ID, strict=STRICT_LOAD), None
 
 

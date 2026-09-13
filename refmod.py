@@ -76,73 +76,7 @@ AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 # second and channel -> 80 tokens/s.
 TOKENS_POR_SEGUNDO_AUDIO = 80
 
-# Repo del modelo y los DOS UNICOS prefijos que RefMod necesita de el.
-#
-# POR QUE ESTO EXISTE. Un RefMod no carga el DiT: solo codifica con los VAEs. El
-# repo completo son 41,4 GB y los VAEs 5,8, asi que obligar a bajarse el modelo
-# entero a alguien que solo quiere extraer una referencia es cobrarle 35 GB por
-# algo que no va a usar. Y se afina mas todavia, porque los dos no valen lo
-# mismo: el de video son 5,2 GB y el de audio 0,6. Cada pasada baja solo el suyo.
-#
-# Why this exists: a RefMod never loads the DiT, it only encodes with the VAEs.
-# The full repo is 41.4 GB and the VAEs are 5.8, so making someone fetch the
-# whole model to extract one reference charges them 35 GB for something they will
-# not use. It splits finer still: the video VAE is 5.2 GB and the audio one 0.6,
-# so each pass downloads only its own.
-REPO_NF4 = "AcademiaSD/MiniMax-H3-NF4"
-PATRON_VAE_VIDEO = "vae/*"
-PATRON_VAE_AUDIO = "audio_vae/*"
-
 _PRECACHE = None
-
-
-def vaes_presentes(nf4_model_id):
-    """(hay_video, hay_audio). Mismas rutas que busca la pre-cache."""
-    video = any(os.path.isfile(os.path.join(nf4_model_id, *tramo)) for tramo in (
-        ("vae", "minimax_h3_video_vae.safetensors"),
-        ("vae", "minimax_h3_video_vae_fp16.safetensors"),
-        ("minimax_h3_video_vae.safetensors",),
-        ("minimax_h3_video_vae_fp16.safetensors",),
-    ))
-    audio = os.path.isfile(os.path.join(nf4_model_id, "audio_vae", "config.json"))
-    return video, audio
-
-
-def asegurar_vaes(nf4_model_id, video=True, audio=True, repo_id=REPO_NF4, log=print):
-    """Descarga los VAEs que falten, y SOLO esos. Devuelve (hay_video, hay_audio).
-
-    No lanza excepcion si falla: devuelve lo que haya, y el llamante decide. Un
-    fallo de red al bajar el VAE de audio no tiene por que tumbar una extraccion
-    visual que no lo necesitaba.
-
-    Downloads the missing VAEs and only those. Returns what is available rather
-    than raising: a network failure fetching the audio VAE should not take down a
-    visual extraction that never needed it.
-    """
-    hay_video, hay_audio = vaes_presentes(nf4_model_id)
-    faltan = []
-    if video and not hay_video:
-        faltan.append((PATRON_VAE_VIDEO, "video VAE", 5.2))
-    if audio and not hay_audio:
-        faltan.append((PATRON_VAE_AUDIO, "audio VAE", 0.6))
-    if not faltan:
-        return hay_video, hay_audio
-
-    total = sum(g for _, _, g in faltan)
-    log("[REFMOD] Falta(n) {} en {} -- descargando ~{:.1f} GB de {} (el repo completo "
-        "son 41 GB; RefMod no necesita el resto). / Missing {}; downloading ~{:.1f} GB "
-        "from {} -- the full repo is 41 GB and RefMod does not need the rest."
-        .format(", ".join(n for _, n, _ in faltan), os.path.abspath(nf4_model_id),
-                total, repo_id, ", ".join(n for _, n, _ in faltan), total, repo_id))
-    try:
-        from huggingface_hub import snapshot_download
-        os.makedirs(nf4_model_id, exist_ok=True)
-        snapshot_download(repo_id=repo_id, local_dir=nf4_model_id,
-                          allow_patterns=[pat for pat, _, _ in faltan])
-        log("[REFMOD] Descarga completada. / Download complete.")
-    except Exception as exc:
-        log("[REFMOD][ERROR] No se pudo descargar: {} / download failed".format(exc))
-    return vaes_presentes(nf4_model_id)
 
 
 def precache():
@@ -167,6 +101,32 @@ def precache():
         spec.loader.exec_module(mod)
         _PRECACHE = mod
     return _PRECACHE
+
+
+REPO_NF4 = "AcademiaSD/MiniMax-H3-NF4"
+
+
+def vaes_presentes(nf4_model_id):
+    """(hay_video, hay_audio). Delega en la pre-cache, que define donde vive cada uno."""
+    return precache().vaes_presentes(nf4_model_id)
+
+
+def asegurar_vaes(nf4_model_id, video=True, audio=True, repo_id=REPO_NF4, log=print):
+    """Descarga los VAEs que falten, y SOLO esos.
+
+    La implementacion vive en 1_pre_cache_MiniMaxH3.py, que es quien sabe donde
+    busca cada VAE, y asi la pre-cache tambien se repara sola si alguien borra
+    uno a mano. Aqui importa por el motivo contrario: un RefMod no carga el DiT,
+    asi que quien solo extraiga referencias no tiene por que bajarse los 41 GB
+    del repo -- y como el VAE de video pesa 5,2 GB y el de audio 0,6, cada pasada
+    pide unicamente el suyo.
+
+    The implementation lives in the pre-cache module, which owns where each VAE
+    is looked up, so the pre-cache repairs itself too when one is deleted by
+    hand. It matters here for the opposite reason: a RefMod never loads the DiT.
+    """
+    return precache().asegurar_vaes(nf4_model_id, video=video, audio=audio,
+                                    repo_id=repo_id, log=log)
 
 
 # ══════════════════════════════════════════════════════════════════════════
