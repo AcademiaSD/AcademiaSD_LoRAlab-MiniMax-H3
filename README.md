@@ -32,7 +32,7 @@
 
 > **Why rank 16 and not rank 8.** Rank 8 produces an equally good likeness for less VRAM, which makes it look like the better deal — but it is not. With only 8 directions per matrix the adapter runs out of room for the identity and starts occupying directions the base model was using for composition. The symptom is subtle and easy to misread: the face is perfect, and the model stops obeying the prompt. Ask for a beach and you get a bedroom. Rank 16 has room for the identity without evicting anything, so likeness and prompt adherence improve together.
 
-This trainer takes **images, video clips, or both in the same folder**. Images teach appearance; clips teach how something *changes over time* — a transition, a transformation, a camera move. **Audio is not trained yet**, although the pre-cache already reads the audio VAE geometry so the format does not have to change when it is.
+This trainer takes **images, video clips, or both in the same folder**. Images teach appearance; clips teach how something *changes over time* — a transition, a transformation, a camera move. **Audio is trained too**, from clips that carry a soundtrack or from standalone audio takes — though training audio *on its own* is still in development and takes the video branch down with it past a point; the audio section below says exactly where that line is.
 
 > **Verified result (video):** 9 clips of **5.2 s** at **192×192**, **124 frames**, 600 steps, LR 2e-4, **rank/alpha 8** → the effect reproduces cleanly at strength 1.0 in `FL2VA`. Total time **1 h 10 min** on a 16 GB card. Clips are far more forgiving of low resolution than faces are, because what the LoRA has to learn is *motion*, not detail.
 
@@ -625,10 +625,14 @@ Most settings live in the `DEFAULTS` dictionary at the top of each script, docum
 AcademiaSD_LoRAlab-MiniMaxH3/
 ├── assets/
 │   ├── portada.jpg                 # Web GUI header banner
+│   ├── audio_solo.png              # Dataset badge: sample carries audio
+│   ├── audio_mute.png              # Dataset badge: sample is mute
 │   └── logo_128.png                # Browser favicon
 ├── 0_caption_MiniMaxH3.py          # Auto-captioning with Qwen3-VL-4B (optional)
 ├── 1_pre_cache_MiniMaxH3.py        # Text encoder (layer 50) + VAE latent pre-caching
 ├── 2_train_lora_MiniMaxH3.py       # 33B NF4 LoRA trainer, block swap, previews, export
+├── refmod.py                       # RefMod extraction (VAEs only, no DiT, no training)
+├── melband/                        # Mel-Band RoFormer vocal separation (vendored model code)
 ├── server.py                       # Flask backend
 ├── trainer_ui.html                 # Web GUI
 ├── Run_LoRAlab-MiniMaxH3.bat       # 1-click launcher
@@ -638,8 +642,10 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 ├── pre_cache_settings.json         # Active pre-cache configuration
 ├── train_settings.json             # Active training configuration
 ├── HF_token.json                   # Optional Hugging Face token
-├── MiniMax-H3-NF4/                 # Quantized model (auto-downloaded, ~39 GB)
+├── MiniMax-H3-NF4/                 # Quantized model (auto-downloaded, ~41 GB; RefMod needs only its 5.8 GB of VAEs)
 ├── Qwen3-VL-4B-Instruct/           # Captioning model (auto-downloaded, ~8 GB)
+├── MelBandRoFormer/                # Vocal separation weights (auto-downloaded, ~600 MB, optional)
+├── refmods/                        # RefMods, when no models/refmods folder is given
 ├── cached_data_minimaxh3_<project>/
 └── minimaxh3_lora_output_<project>/
     ├── MiniMaxH3_LoRA_step_<N>.safetensors
