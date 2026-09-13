@@ -533,6 +533,19 @@ from video clips, and **none carries audio**.
 | Resolution | `1024` | Short edge, downscale only. Set **512** to reproduce the 22-still pattern; at 1024 the same budget buys about five stills. |
 | Concept type | `identity` | Stored in the mod and read back by the loader. |
 
+**A RefMod uses no trigger word.** A trigger exists to give a LoRA a rare token
+to hang its moved weights on; a RefMod moves no weights. Its latent goes into the
+conditioning's refs and the DiT attends to it whether or not any particular word
+appears in the prompt — there is nothing to invoke, because the mod is already
+acting. The extractor never reads a caption or loads the text encoder.
+
+The nearest thing is the **Description** field. It is stored in the mod and the
+ComfyUI loader emits it on its `prompt_hint` output, merged with the concept
+type — `identity: a ginger woman with messy hair` — so it can be concatenated
+onto the positive prompt instead of being retyped. Write something that actually
+describes the subject: every mod in the published corpus wastes the field on
+`RefMod dataset <name>`, which tells the prompt nothing.
+
 The budget is a ceiling, not a target: four images produce a four-frame mod, not
 a padded one. Mixed folders are fine — each pass takes only what it can use, so
 a stray `.mp3` is ignored by the visual pass and the images by the audio one.
