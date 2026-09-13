@@ -1540,15 +1540,26 @@ def extract_refmod():
         log_tarea("[REFMOD] modo encode | tipo {} | salida {}".format(concepto, destino))
 
         P = refmod.precache()
+
+        # Solo los VAEs que esta pasada vaya a usar. Quien nunca entrene un LoRA
+        # no tiene por que bajarse los 41 GB del modelo para extraer una
+        # referencia. / Only the VAEs this pass will use: someone who never
+        # trains a LoRA should not fetch 41 GB to extract one reference.
+        hay_video, hay_audio = refmod.asegurar_vaes(
+            P.NF4_MODEL_ID,
+            video=kind in ("visual", "both"),
+            audio=kind in ("audio", "both"),
+            log=log_tarea)
+
         escritos, detalles = [], []
         import torch
 
         try:
             if kind in ("audio", "both"):
                 log_tarea("[REFMOD] cargando el VAE de audio / loading the audio VAE...")
-                avae = P.load_h3_audio_vae(P.NF4_MODEL_ID)
+                avae = P.load_h3_audio_vae(P.NF4_MODEL_ID) if hay_audio else None
                 if avae is None:
-                    detalles.append("audio: no hay audio_vae/ en el modelo, se omite")
+                    detalles.append("audio: falta el VAE de audio y no se pudo descargar")
                 else:
                     lat, usados = refmod.extraer_audio(fuentes, avae, tok_a, log=log_tarea)
                     del avae
@@ -1567,6 +1578,10 @@ def extract_refmod():
                                         .format(n, n / 80.0, ruta))
 
             if kind in ("visual", "both"):
+                if not hay_video:
+                    detalles.append("visual: falta el VAE de video y no se pudo descargar")
+                    raise RuntimeError("El VAE de video no esta disponible. / "
+                                       "The video VAE is not available.")
                 log_tarea("[REFMOD] cargando el VAE de video / loading the video VAE...")
                 vvae = refmod.preparar_video_vae(
                     P.load_h3_video_vae(P.NF4_MODEL_ID, P.MODEL_ID, strict=False))

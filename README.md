@@ -540,6 +540,21 @@ a stray `.mp3` is ignored by the visual pass and the images by the audio one.
 Output goes straight to `models/refmods`. There is no export step because there
 is nothing to convert: the file the encoder writes **is** the file ComfyUI loads.
 
+### You do not need the whole model
+
+RefMod never loads the DiT, so the 41 GB NF4 repo is not a prerequisite. If the
+VAEs are missing they are fetched on first use, and **only** the VAEs — which
+splits finer still, because each pass downloads only its own:
+
+| Pass | Downloads | Size |
+| :--- | :--- | ---: |
+| Video / Image | `vae/*` | 5.2 GB |
+| Audio | `audio_vae/*` | 0.6 GB |
+| Both | both | 5.8 GB |
+
+That is 14 % of the full repo. Someone who only wants to extract references
+never has to fetch the 35 GB of transformer they will not use.
+
 ### Audio: use the native node instead
 
 An audio RefMod is written correctly — its latent decodes back to the source
