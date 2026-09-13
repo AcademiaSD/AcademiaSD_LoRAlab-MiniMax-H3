@@ -442,7 +442,7 @@ DEFAULTS = {
     #
     # No bajar de 1.34 sin cambiar tambien el factor 4 de
     # _nf4_swap_required_bytes, y sin medirlo: entre 0,853 y 1,333 es terreno
-    # sin explorar, y equivocarse ahi es un OOM a mitad de una corrida de horas.
+    # sin explorar, y equivocarse ahi es un OOM a mitad de una ejecucion de horas.
     #
     # REAL MINIMUM: 1.34, measured. The limit is the _enforce_manual_swap_budget
     # guard, not the card: it requires block_nf4_bytes * 4, and one NF4 block is
@@ -756,7 +756,7 @@ def log_print(*args, **kwargs):
         "ERROR EN TRAINER",
         "ADALN-FIX",
         # Estos tres tienen que verse SIEMPRE, tambien con debug_training=False:
-        # el tiempo total es el resumen de la corrida, [LIVE] confirma que un
+        # el tiempo total es el resumen de la ejecucion, [LIVE] confirma que un
         # cambio de ajustes en caliente se ha aplicado (sin eco, el usuario no
         # sabe si su "Save JSON" ha surtido efecto) y [PREVIEW] avisa de que se
         # esta generando una imagen, que tarda minutos y si no parece un cuelgue.
@@ -776,7 +776,7 @@ def log_print(*args, **kwargs):
         "[VRAM-PLAN]",
         "[SPILL]",
         "[ATTN]",
-        # El resumen del dataset son 3-4 lineas una sola vez por corrida y es
+        # El resumen del dataset son 3-4 lineas una sola vez por ejecucion y es
         # justo lo que hay que tener delante al decidir el siguiente experimento.
         # Ya no lleva [WARN] porque no es un aviso: es informacion.
         # The dataset summary is 3-4 lines once per run and is exactly what you
@@ -818,7 +818,7 @@ def log_print(*args, **kwargs):
 #
 # server.py solo streamea stdout al terminal del navegador: no guarda NADA en
 # disco. Al cerrar la pestana o reiniciar el servidor se pierde el historial
-# entero de la corrida, incluida la linea de progreso (loss / lr / s-it / gnorm),
+# entero de la ejecucion, incluida la linea de progreso (loss / lr / s-it / gnorm),
 # que se imprime con `print` directo y por tanto sobrevive a debug_training=False.
 # Esto duplica stdout a <OUTPUT_DIR>/train_log.txt sin tocar lo que se ve.
 #
@@ -5078,7 +5078,7 @@ def cache_sequence_tokens(cache_dir):
                 # [texto | video | audio], asi que cuentan igual que las de video
                 # para la VRAM. Un clip de 124 fotogramas son 414 filas: un 31%
                 # mas de secuencia que ignorarlas costaria tres bloques
-                # residentes de mas y un OOM a mitad de corrida.
+                # residentes de mas y un OOM a mitad de ejecucion.
                 # Audio rows live in the SAME packed sequence, so they count like
                 # video rows for VRAM. A 124 frame clip is 414 rows: 31% more
                 # sequence, which ignoring would cost three resident blocks too
@@ -6513,7 +6513,7 @@ def pick_preview_prompt(entries, step):
     Nota sobre `random`: el bucle re-siembra el RNG al principio de CADA paso, y
     la preview corre al FINAL, cuando las tiradas del entrenamiento ya se han
     hecho. Consumir aqui numeros del stream global no altera nada de lo que ve
-    el entrenamiento, ni en esta corrida ni al reanudar.
+    el entrenamiento, ni en esta ejecucion ni al reanudar.
 
     Returns (entry, prompt_result, label). `entry` is only used for the latent
     GEOMETRY, so "custom" borrows the first image's shape. On `random`: the loop
@@ -7258,8 +7258,8 @@ def _ensure_train_runtime():
                             loss_state = json.load(f)
                         resumed_ema_loss = loss_state.get("ema_loss", None)
                         resumed_running_loss = float(loss_state.get("running_loss", 0.0) or 0.0)
-                        # Tiempo ya invertido en corridas anteriores: sin esto, el
-                        # "tiempo total" de una corrida reanudada mentiria y solo
+                        # Tiempo ya invertido en ejecuciones anteriores: sin esto, el
+                        # "tiempo total" de una ejecucion reanudada mentiria y solo
                         # contaria el ultimo tramo.
                         # Time already spent in previous runs; without it the total
                         # of a resumed run would only count the last stretch.
@@ -7498,10 +7498,10 @@ def hot_reload_live_settings():
         if new_total != TOTAL_STEPS:
             if new_total > TOTAL_STEPS:
                 changes.append(
-                    "total_steps: {} -> {} (la corrida se amplia) / the run is "
+                    "total_steps: {} -> {} (la ejecucion se amplia) / the run is "
                     "extended".format(TOTAL_STEPS, new_total))
             else:
-                changes.append("total_steps: {} -> {} (la corrida terminara antes) / the "
+                changes.append("total_steps: {} -> {} (la ejecucion terminara antes) / the "
                                "run will finish earlier".format(TOTAL_STEPS, new_total))
             TOTAL_STEPS = new_total
 
@@ -7680,7 +7680,7 @@ def reload_runtime_config():
 
     # Se instala AQUI, con OUTPUT_DIR ya resuelto y creado, para que el volcado
     # [CONFIG] de mas abajo tambien quede en el fichero: es justo lo que hay que
-    # poder releer cuando una corrida sale rara.
+    # poder releer cuando una ejecucion sale rara.
     # Installed HERE, with OUTPUT_DIR resolved and created, so the [CONFIG] dump
     # below also lands in the file.
     install_train_log(OUTPUT_DIR)
@@ -7857,7 +7857,7 @@ def train_minimaxh3():
     resumed_running_loss = runtime.get("running_loss", 0.0)
     resumed_elapsed = float(runtime.get("elapsed_seconds", 0.0) or 0.0)
     # Cronometro de ESTA sesion. El total que se reporta al final es
-    # resumed_elapsed + lo de esta sesion, para que una corrida reanudada no
+    # resumed_elapsed + lo de esta sesion, para que una ejecucion reanudada no
     # cuente solo el ultimo tramo.
     # This session's stopwatch; the reported total adds the time already
     # spent in previous runs so a resumed run does not under-report.
@@ -8131,7 +8131,7 @@ def train_minimaxh3():
 
         Con range(start, TOTAL_STEPS+1) el limite queda congelado al entrar en el
         bucle, asi que subir los pasos en caliente no tenia ningun efecto. Un
-        generador lo vuelve a leer cada vez, de modo que ampliar la corrida desde
+        generador lo vuelve a leer cada vez, de modo que ampliar la ejecucion desde
         la GUI funciona igual que acortarla.
 
         Yields steps re-reading TOTAL_STEPS on EVERY iteration. With a range() the
@@ -8189,7 +8189,7 @@ def train_minimaxh3():
             if step > TOTAL_STEPS:
                 log_print("")
                 log_print("[LIVE] total_steps was lowered to {}: finishing the run. / "
-                          "total_steps se bajo a {}: terminando la corrida."
+                          "total_steps se bajo a {}: terminando la ejecucion."
                           .format(TOTAL_STEPS, TOTAL_STEPS), flush=True)
                 break
 
@@ -8216,7 +8216,7 @@ def train_minimaxh3():
             # el mismo prefijo de muestras.
             #
             # Derivando la semilla del índice de paso, el paso N usa siempre los
-            # mismos datos tanto si viene de una corrida continua como de diez
+            # mismos datos tanto si viene de una ejecucion continua como de diez
             # reanudaciones: reanudar pasa a ser EXACTAMENTE equivalente a no parar.
             # ----------------------------------------------------------------
             if SEED > 0:
@@ -8684,7 +8684,7 @@ def train_minimaxh3():
                 # fotograma negro de relleno, que a proposito no recibe gradiente:
                 # la sonda avisa correctamente de que no mejora, pero de algo que
                 # nadie esta entrenando. Ese aviso, repetido cada N pasos en una
-                # corrida que va bien, ensena a ignorar los avisos.
+                # ejecucion que va bien, ensena a ignorar los avisos.
                 # The probe measures whether the LoRA improves its prediction on
                 # the sample's own IMAGE. On an audio-only take the image is the
                 # black filler frame, which deliberately gets no gradient: the
@@ -9115,8 +9115,8 @@ def train_minimaxh3():
             # running_loss se restaura del checkpoint acumulado desde el paso 1,
             # asi que hay que dividir por `step`, no por los pasos transcurridos
             # desde la reanudacion: con `step - start_step` el primer paso tras
-            # reanudar mostraba la suma entera de la corrida dividida por 1.
-            # En una corrida continua start_step=0 y las dos formulas coinciden.
+            # reanudar mostraba la suma entera de la ejecucion dividida por 1.
+            # En una ejecucion continua start_step=0 y las dos formulas coinciden.
             # running_loss is restored cumulative from step 1, so divide by
             # `step`. With `step - start_step` the first step after a resume
             # showed the whole run's sum divided by one.
@@ -9247,7 +9247,7 @@ def train_minimaxh3():
                     log_print("[PREVIEW][WARN] The preview failed and is now DISABLED "
                               "for the rest of the run; training continues. Reason: {} / "
                               "La preview fallo y se DESACTIVA para el resto de la "
-                              "corrida; el entrenamiento sigue. Motivo: {}"
+                              "ejecucion; el entrenamiento sigue. Motivo: {}"
                               .format(_e_prev, _e_prev), flush=True)
                     if DEBUG_TRAINING:
                         traceback.print_exc()
@@ -9255,7 +9255,7 @@ def train_minimaxh3():
     except KeyboardInterrupt:
         # Se guarda el ultimo paso COMPLETADO, no el que estaba en vuelo cuando
         # llego la senal. Reanudar repite ese paso interrumpido desde cero, que
-        # es exactamente lo que haria una corrida sin parada.
+        # es exactamente lo que haria una ejecucion sin parada.
         # Checkpoint the last COMPLETED step, not the in-flight one. Resuming
         # then re-runs the interrupted step from scratch, which is exactly what
         # an uninterrupted run would have done.

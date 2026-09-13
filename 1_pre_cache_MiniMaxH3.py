@@ -815,7 +815,7 @@ def read_prompt(base_name):
     # para eso tiene que representar al modelo SIN el concepto; si lleva la
     # palabra clave deja de ser un ancla y pasa a ser un ejemplo mas de lo que se
     # entrena. Se podia borrar del .txt las veces que se quisiera: volvia a
-    # aparecer aqui, sin decirlo, y la corrida entera se iba a la basura sin que
+    # aparecer aqui, sin decirlo, y la ejecucion entera se iba a la basura sin que
     # nada en el log lo explicara.
     #
     # Ahora lo que ponga el caption es lo que se codifica. Para anadir la palabra
@@ -1674,7 +1674,7 @@ def backfill_missing_from_hub(model, nf4_te_dir, repo_id, subfolders, max_layer)
 
     if fetched:
         # Cache with FULL-PATH model keys so the next run resolves them via strategy S2.
-        # Cachear con claves de ruta completa para que la proxima corrida las resuelva con S2.
+        # Cachear con claves de ruta completa para que la proxima ejecucion las resuelva con S2.
         try:
             from safetensors.torch import save_file
             extra_dir = os.path.join(nf4_te_dir, "weights_extra")
@@ -1683,7 +1683,7 @@ def backfill_missing_from_hub(model, nf4_te_dir, repo_id, subfolders, max_layer)
             save_file({k: v.contiguous() for k, v in fetched.items()}, cache_path)
             report["cache_file"] = cache_path
             log_dev(L("[BACKFILL] Cached to {} - later runs will not re-download.",
-                      "[BACKFILL] Cacheado en {} - las siguientes corridas no volveran a descargar.")
+                      "[BACKFILL] Cacheado en {} - las siguientes ejecuciones no volveran a descargar.")
                     .format(cache_path))
         except Exception as e:
             diag_warn("could not cache backfill / no se pudo cachear el backfill: {}".format(e))

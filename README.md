@@ -319,6 +319,21 @@ teaches the model that the final state's words belong to a half-finished image.
 
 #### Training audio
 
+> ### ⚠️ Audio-only training does not work properly yet. It is in development.
+>
+> It runs, it converges, and it reproduces a voice's timbre well — the best
+> measured result reached a spectral distance of 0.240 from the real voice. But
+> past a point it takes the video branch down with it, and the point arrives
+> before the voice is finished. What the section below describes is the current
+> state of an unsolved problem, not a recipe that works end to end.
+>
+> **Audio as part of a video+audio clip is a different case and behaves well.**
+> The trouble is specific to datasets where audio is trained on its own.
+>
+> If what you want is a voice for generation rather than a trained one, the
+> native `MiniMaxH3ReferenceToVideo` node in ComfyUI does it without training
+> anything — see the RefMod section below.
+
 Drop `.wav`, `.mp3`, `.flac` or `.m4a` next to their `.txt` captions, the same
 way as clips. A folder may hold any mixture:
 
@@ -623,7 +638,7 @@ AcademiaSD_LoRAlab-MiniMaxH3/
 
 ## ⚠️ Beta notes & known limitations
 
-* **Audio training has no dedicated weights.** The LoRA lives entirely in the shared transformer blocks, so training audio moves weights the video branch depends on. On an audio-only dataset that branch drifts and eventually stops producing anything coherent. Anchor clips fix it, and the README section above says how; there is no setting that avoids the need for them.
+* **Audio-only training is in development and does not work properly yet.** The LoRA lives entirely in the shared transformer blocks — all 416 tensors, none of them touching `audio_proj_in` or `audio_proj_out` — so training audio moves weights the video branch depends on, and on an audio-only dataset that branch gets no gradient of its own. It drifts, and past a point it stops producing anything coherent. The timbre gets there (0.240 spectral distance measured); the crossing arrives first. Anchor clips move the crossing and the section above says how, but nothing removes it, and no learning rate or schedule avoids it — lowering the rate only takes longer to reach the same place. Audio inside a video+audio clip is a different case and behaves well.
 * **No captioner hears.** Qwen3-VL describes pictures, so audio captions are written by hand or filled in bulk. The prompt selector keeps an audio entry so the text is ready when a model that listens exists.
 * **Uses the generic H3 partition.** Not `FL2VA` (first/last frame) or `Ref2VA` (reference-to-video). LoRAs trained here apply to the standard text-to-video path.
 * **Previews are not ComfyUI.** The preview sampler is a compact single-frame path; it is a progress indicator, not a quality benchmark. Judge the final LoRA in ComfyUI.
