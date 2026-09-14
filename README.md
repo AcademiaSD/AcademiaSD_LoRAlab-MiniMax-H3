@@ -546,58 +546,82 @@ instead of being retyped. Write something that actually describes the subject:
 every mod in the published corpus wastes the field on `RefMod dataset <name>`,
 which tells the prompt nothing. The filename is not a handle either.
 
-### Pointing at one mod out of several
+### Two characters in one shot
 
-H3 addresses its references positionally. The text encoder weaves a label in
-front of each one at tokenize time — `<Picture 1>`, `<Video 1>`, `<Audio 1>`,
-counted per modality — so a prompt can say:
+Everything below was measured over about twenty generations on **Ref2VA**, with
+`Apply H3 RefMod`. It is not in the node's README, the corpus guide, or anywhere
+else we could find, and most of it is the opposite of what looks reasonable.
 
-> The woman in `<Picture 1>` hands a book to the man in `<Picture 2>`.
+**References are matched by position, counted separately per modality.** The
+loader's Nth *visual* mod is `<Subject N>` in the prompt, and the Nth *audio* mod
+is that subject's voice. This is the same per-modality counting H3's own
+tokenizer does. So the loader has to be laid out like this:
 
-Which node you use decides whether your mods get those labels, and the two are
-alternatives rather than a chain:
+```
+slot 1   subject A   visual        ->  <Subject 1>
+slot 2   subject B   visual        ->  <Subject 2>
+slot 3   subject A   audio         ->  <Subject 1>'s voice
+slot 4   subject B   audio         ->  <Subject 2>'s voice
+```
 
-| Node | Labels | When |
-| :--- | :--- | :--- |
-| **Apply H3 RefMod** | none | one dominant concept, or several that answer *different* questions |
-| **H3 RefMod Text Encode** | `<Picture n>` | two or more mods you need to tell apart |
+**All the visuals first, then all the audio.** Interleaving them shifts the
+positions and the pairing comes apart.
 
-`Apply` injects the latents *after* the prompt has been tokenised, so no label is
-ever emitted for them: the DiT attends to the mods, but the text has no handle on
-any of them. That is fine — and is what the whole published corpus does — as
-long as the mods do not compete. `identity` + `background` + `style` answer three
-different questions and need no arbitration. Two identities do.
+**Either every subject has a voice, or none does.** One audio reference for two
+faces is the single worst thing you can do: the orphan voice gets attached
+somewhere, and from then on nothing in the prompt behaves. Roughly thirteen
+generations of this looked like a conspiracy of side-of-frame, subject numbering
+and slot order rules, none of which turned out to exist. With no audio at all the
+model simply invents a voice, which is a perfectly good control.
 
-**H3 RefMod Text Encode** tokenises the prompt *with* the mods declared, so they
-come in through the same door as native references and receive the same numbering.
-It replaces `Apply`: it attaches the refs itself, and applying the same mods again
-afterwards would inject them twice. Three things to know about it:
+**Write `<Subject 1>` and `<Subject 2>` in the prompt. Do not give them names.**
+A real name the model knows brings its own prior, which competes with your
+reference and wins -- writing `arnoldschwarzenegger` once produced *two* of him,
+one of them painted over the other subject's reference. An invented name avoids
+the prior but the model tries to *pronounce* it: `4c4d3m14SD` came out being
+spelled aloud before the dialogue. Referring to the subject tags directly has
+neither problem.
 
-* It wants the **video VAE**. A reference the text encoder can read has to be
-  decoded back into pictures for Qwen to see; only audio-only bundles can skip it.
-* Numbering **excludes zero-strength rows**. Muting a slot does not leave a gap,
-  it renumbers everything after it.
-* Connect its `reference_map` output to a text node and it tells you the actual
-  assignment, rather than counting slots by hand.
-* Set **`reference_fps` to 2** for mods built from stacked stills. The node
-  samples visual references at 2 fps for Qwen, so at the default 24 a 22-frame
-  identity mod shows the text encoder only two or three of its views — precisely
-  when you are asking it to tell two characters apart.
+With those in place the prompt is finally in charge: who stands where, and who
+speaks, come out as written.
 
-**Confirmed working, on Ref2VA.** Two identity mods from the published corpus,
-loaded in slots 1 and 2 and addressed as `<Video 1>` and `<Video 2>`, produced
-the right character in the right place. `<Video n>` rather than `<Picture n>`
-because a mod built from many stills has more than one latent frame, which makes
-its kind `video`; the `reference_map` output settles it either way. Audio came
-out correct **without being referenced at all** — a voice does not compete with
-anything, so it needs no label; what needed arbitration was the two faces.
+```
+subject_definitions:
+<Subject 1> Realistic person, natural human appearance.
+<Subject 2> Realistic person, natural human appearance.
 
-One caveat from that run: with several references loaded you may need **more
-sampling steps, even with a turbo LoRA**. A turbo LoRA is distilled to land in
-few steps on the model's base distribution, and two identity mods add some 11,000
-tokens for the DiT to reconcile at every step. That is a plausible reading of one
-observation, not a measurement — but if two characters come out muddy, raise the
-steps before concluding the references failed.
+integrated_multimodal_description:
+[Shot 1] Live-action, 35mm cinematic look, fine film grain, natural photoreal
+lighting, shallow depth of field. Continuous take, static camera at eye level.
+Tight two-shot, medium close-up: <Subject 1> on the left and <Subject 2> on the
+right, both faces filling the frame. Neither moves from their position.
+<Subject 1> is the only one speaking. <Subject 2> listens in silence.
+<Subject 1> opens his mouth and says in Spanish: <d>Hola, cuanto tiempo.</d>
+
+overall_soundscape:
+Quiet room tone, clear vocal presence.
+
+non_diegetic_music:
+N/A
+```
+
+`<d>...</d>` is a real token -- H3's tokenizer defines it, along with
+`<|lyrics_start|>`, `<|caption_start|>` and a few others -- so dialogue belongs
+inside it. `<Subject n>`, `(S1)` and `<Picture n>` are ordinary text on this path:
+`Apply` injects the latents *after* the prompt is tokenised, so no positional
+label is ever emitted for a RefMod. They work as writing, not as tokens.
+
+> **It is not deterministic.** Every so often a subject is duplicated -- both
+> faces come out as the same person -- or a reference is ignored, and the voices
+> can swap. It is the exception rather than the rule, but check the preview
+> before committing to a long render. Audio-only and visual-only pairs were not
+> tested.
+
+**Voice transfer works, and across identities.** One subject's voice reference
+applied cleanly to another subject's face. The node's README lists speaker
+identity transfer as not working in current tests; on Ref2VA, with the layout
+above, it does.
+
 
 Keep one concept per file. Stacking two characters inside a single mod gives you
 one latent with no way to separate them again; two files can at least be numbered.
