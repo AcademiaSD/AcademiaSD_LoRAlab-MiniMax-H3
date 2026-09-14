@@ -574,6 +574,14 @@ all: everything measured here used RefMods alone.
 **All the visuals first, then all the audio.** Interleaving them shifts the
 positions and the pairing comes apart.
 
+**Where a character stands in frame has nothing to do with it.** Swapping the
+two subjects left-to-right in the prompt, with the slots untouched, moved the
+faces and left every voice attached to the same subject as before. It is worth
+stating because the opposite looks true for a while: during the orphan-audio runs
+a side-of-frame rule seemed to be emerging, and it cost about thirteen
+generations. There is no such rule. If voices appear to follow screen position,
+the references are misconfigured and that is where to look.
+
 **Either every subject has a voice, or none does.** One audio reference for two
 faces is the single worst thing you can do: the orphan voice gets attached
 somewhere, and from then on nothing in the prompt behaves. Roughly thirteen
