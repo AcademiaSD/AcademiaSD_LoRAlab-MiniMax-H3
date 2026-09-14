@@ -584,9 +584,14 @@ model simply invents a voice, which is a perfectly good control.
 **Bind the names, or use no names at all.** Writing a bare name in the prompt
 goes wrong in both directions: a real one the model knows brings its own prior,
 which competes with your reference and wins -- `arnoldschwarzenegger` once
-produced *two* of him, one painted over the other subject's reference -- while an
-invented one dodges the prior but gets *pronounced*, and `4c4d3m14SD` came out
+produced *two* of him, one painted over the other subject's reference -- while a
+name that does not look like a name gets *pronounced*, and `4c4d3m14SD` came out
 being spelled aloud before the dialogue.
+
+The trick that solves both is to **bind a real face to an invented but ordinary-
+sounding name**. Arnold's mod bound as `Chauchi` keeps the celebrity prior out,
+because the name carries none, and is never spelled aloud, because it reads as a
+normal Spanish word. Invented is not the problem; unpronounceable is.
 
 Two forms avoid both. Declaring the binding explicitly is the better one, since
 it lets the rest of the prompt read naturally. The convention is not invented:
@@ -661,31 +666,51 @@ you do not recognise, look at what is inside the reference rather than at the
 prompt. More than one audio reference also makes pronunciation artefacts more
 likely.
 
-**How far you can push it.** Reliability degrades with the number of references,
-and the failure mode changes as it does:
+**Let the node build the AV latent.** This turned out to matter more than
+anything else on this page. `temporal_shape` derives *both* axes from a single
+frame count:
+
+```python
+frame_count = align_frame_count(max(5, length))   # 107
+latent_t    = video_latent_t(frame_count)         # 32   <- video axis
+audio_t     = round(frame_count / 24 * 40)        # 178  <- audio axis
+```
+
+Because both come from the same number they agree, by construction, on where the
+clip ends. Build the latent yourself -- deriving the audio axis from the source
+file's real duration, say -- and the two streams disagree by a latent or two.
+Nothing errors. What you get instead is the symptom below.
+
+**The symptom of a misaligned latent.** The clip opens in the *other* subject's
+voice saying something incoherent, pauses, and then delivers the requested line
+correctly in the voice that should have said it all along -- both voices out of
+the same mouth, one after the other. Measured on one such clip: F0 of 157 Hz for
+the first stretch and 84 Hz for the second, separated by a 0.6 s silence, nearly
+an octave apart. It reads like a reference problem and it is not one. The
+timbre was never wrong; the time axis was.
+
+Once the latent comes from the node, the hard cases stop being hard. Two faces,
+two voices, taking turns in one shot, each in their own voice, with no artefacts
+and no stray words -- twice consecutively, which is the best consistency this
+page has recorded:
 
 | Layout | Behaviour |
 | :--- | :--- |
 | one visual | reliable |
 | one visual + one audio | reliable |
 | two visuals | reliable |
-| two visuals + one audio | can get the assignment wrong |
-| two visuals + two audios | voices from the encoding can surface and cross between characters |
+| two visuals + one audio | reliable |
+| two visuals + two audios, one speaking | reliable |
+| two visuals + two audios, taking turns | reliable |
 
-The worst case is worth recognising when you hear it. The clip opens in the
-*other* subject's voice saying something incoherent, pauses, and then delivers
-the requested line correctly in the voice that should have said it all along --
-both voices coming out of the same mouth, one after the other. Measured on one
-such clip, the first stretch runs at an F0 of 157 Hz and the second at 84 Hz,
-separated by a 0.6 s silence: nearly an octave apart, so two distinct voices
-rather than one modulating. Nothing is wrong with the references when this
-happens; the model simply had two encoded voices available and used both.
+Any valid grid value works, including ones below the 124 the tooltip calls the
+trained floor: 107 frames (4.46 s) ran clean. The grid is what matters, not the
+size.
 
 > **It is not deterministic.** Every so often a subject is duplicated -- both
-> faces come out as the same person -- or a reference is ignored, and the voices
-> can swap. It is the exception rather than the rule, but check the preview
-> before committing to a long render. Audio-only and visual-only pairs were not
-> tested.
+> faces come out as the same person -- or a reference is ignored. It is the
+> exception rather than the rule, but check the preview before committing to a
+> long render. Audio-only and visual-only pairs were not tested.
 
 **Voice transfer works, and across identities.** One subject's voice reference
 applied cleanly to another subject's face. The node's README lists speaker
@@ -737,11 +762,14 @@ On **Ref2VA** it works, with the positional layout described above: one visual
 and one audio reference reproduce the right voice on the right face, and voice
 transfer across identities works too.
 
-On **FL2VA** it does not. The same file becomes a standalone `audio` ref block
-that the model places on its own temporal cursor, bound to no identity, and the
-generated voice does not resemble the reference. If that is the partition you
-are on, or if you want a voice tied to picture with no ambiguity at all, the
-**native `MiniMaxH3ReferenceToVideo` node** is the stronger path:
+On **FL2VA** it did not, when tested: the same file became a standalone `audio`
+ref block that the model placed on its own temporal cursor, bound to no identity,
+with a generated voice that did not resemble the reference. Treat that as
+unconfirmed. Those runs predate the latent fix above, and a misaligned time axis
+produces symptoms easy to mistake for exactly this. It has not been retested.
+
+Either way, if you want a voice welded to picture with no ambiguity at all, the
+**native `MiniMaxH3ReferenceToVideo` node** is still the stronger path:
 
 * `ref_audios.ref_audio_0` for a voice on its own (it needs a Trim node wired to
   `duration`).
