@@ -66,6 +66,24 @@ from safetensors.torch import save_file
 META_KEY = "refmod_meta"
 FORMAT_VERSION = 4
 
+# Un "bundle" es un CONTENEDOR, no una fusion. Guarda varias referencias en un
+# fichero, cada una con su tensor propio (ref_0, ref_1...) y sus metadatos, y al
+# cargarlo se despliegan como bloques independientes: exactamente lo mismo que
+# dos ficheros sueltos, con un fichero menos que manejar.
+#
+# Conviene tenerlo claro porque el nombre invita a pensar lo contrario: NO ata la
+# voz a la cara. El propio formato lo dice en su primera linea -- "it does not
+# concatenate audio with visual latents or change H3 conditioning semantics" -- y
+# el autor lo repite en las notas de la v0.2.6: "bundling does not add
+# voice-to-character binding". Quien busque esa union necesita el bloque
+# video_audio del modelo, que ningun extractor emite.
+#
+# A bundle is a CONTAINER, not a fusion: several references in one file, each
+# with its own tensor and metadata, expanded into independent blocks on load.
+# It does NOT bind voice to identity, whatever the name suggests.
+BUNDLE_VERSION = 5
+BUNDLE_MAX_MIEMBROS = 256
+
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
 AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
@@ -140,15 +158,15 @@ def token_count(latent, kind):
     return int(latent.shape[2]) * (int(latent.shape[3]) // 2) * (int(latent.shape[4]) // 2)
 
 
-def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
-            source_shape="", pool="", description="", concept_type="generic",
-            tags=None, sample_rate=32000):
-    """Escribe {ruta}.safetensors con los metadatos en la cabecera.
+def _metadatos(latent, kind, name, mode="encode", source="", source_shape="",
+               pool="", description="", concept_type="generic", tags=None,
+               sample_rate=32000):
+    """Los metadatos de UNA referencia, validando su forma.
 
-    Se escribe a un temporal y se renombra: un safetensors a medio escribir en
-    models/refmods aparece igualmente en el desplegable de ComfyUI y revienta al
-    cargarlo. / Written to a temp file and renamed: a half-written safetensors
-    still shows up in ComfyUI's dropdown and fails on load.
+    Es la misma estructura tanto si acaba sola en un fichero como si va dentro de
+    un bundle: alli cada miembro conserva sus propios metadatos de version 4.
+    The same structure whether it ends up alone in a file or inside a bundle,
+    where each member keeps its own version-4 metadata.
     """
     if kind == "audio":
         if latent.ndim != 4 or tuple(latent.shape[:3]) != (1, 32, 2):
@@ -156,14 +174,29 @@ def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
                              .format(tuple(latent.shape)))
         latent_t = int(latent.shape[-1])
         latent_h = latent_w = 0
+        if latent_t <= 0:
+            raise ValueError("El latente de audio necesita T > 0.")
     else:
         if latent.ndim != 5:
             raise ValueError("El latente visual debe ser [1,24,T,H,W], no {}"
                              .format(tuple(latent.shape)))
         latent_t = int(latent.shape[2])
         latent_h, latent_w = int(latent.shape[3]), int(latent.shape[4])
+        # El formato exige H y W PARES y positivas: los tokens son (H/2)x(W/2),
+        # asi que una dimension impar daria un recuento que no cuadra y el
+        # cargador rechaza el fichero.
+        # The format requires EVEN positive H and W: tokens are (H/2)x(W/2), so an
+        # odd dimension yields a count that does not add up and the loader
+        # rejects the file.
+        if latent_t <= 0 or latent_h <= 0 or latent_w <= 0:
+            raise ValueError("El latente visual necesita T, H y W positivos.")
+        if latent_h % 2 or latent_w % 2:
+            raise ValueError("El formato exige H y W pares; son {}x{}"
+                             .format(latent_h, latent_w))
+        if kind == "image" and latent_t != 1:
+            raise ValueError("kind 'image' exige un unico fotograma latente.")
 
-    meta = {
+    return {
         "name": name,
         "kind": kind,
         "latent_h": latent_h,
@@ -181,19 +214,75 @@ def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
         "sample_rate": int(sample_rate),
     }
 
+
+def _escribir(tensores, meta, ruta_sin_ext):
+    """Escribe el safetensors de forma atomica. / Writes the safetensors atomically.
+
+    A un temporal y luego os.replace: un fichero a medio escribir en
+    models/refmods aparece igualmente en el desplegable de ComfyUI y revienta al
+    cargarlo. / A half-written file still shows up in ComfyUI's dropdown.
+    """
     destino = ruta_sin_ext + ".safetensors"
     carpeta = os.path.dirname(destino) or "."
     os.makedirs(carpeta, exist_ok=True)
     fd, temporal = tempfile.mkstemp(prefix=".refmod-", suffix=".tmp", dir=carpeta)
     os.close(fd)
     try:
-        save_file({"latent": latent.contiguous()}, temporal,
+        save_file({k: v.contiguous() for k, v in tensores.items()}, temporal,
                   metadata={META_KEY: json.dumps(meta)})
         os.replace(temporal, destino)
     finally:
         if os.path.exists(temporal):
             os.unlink(temporal)
     return destino
+
+
+def guardar_bundle(miembros, name, ruta_sin_ext):
+    """Varias referencias en UN fichero, en el formato de version 5.
+
+    `miembros` es una lista de (latent, kind, kwargs) en el orden en que se
+    quieren guardar. Los tensores van como ref_0, ref_1... emparejados por
+    POSICION con la lista `members` de los metadatos; ese emparejamiento es todo
+    el formato, asi que el orden no es cosmetico.
+
+    `miembros` is a list of (latent, kind, kwargs). Tensors are stored as ref_0,
+    ref_1... paired BY POSITION with the metadata's `members` list; that pairing
+    is the whole format, so the order is not cosmetic.
+    """
+    if not miembros:
+        raise ValueError("Un bundle necesita al menos una referencia.")
+    if len(miembros) > BUNDLE_MAX_MIEMBROS:
+        raise ValueError("Un bundle admite hasta {} miembros; hay {}."
+                         .format(BUNDLE_MAX_MIEMBROS, len(miembros)))
+
+    tensores, members = {}, []
+    for i, (latent, kind, kw) in enumerate(miembros):
+        members.append(_metadatos(latent, kind, **kw))
+        tensores["ref_{}".format(i)] = latent
+
+    meta = {
+        "_format_version": BUNDLE_VERSION,
+        "kind": "bundle",
+        "name": name,
+        "members": members,
+    }
+    return _escribir(tensores, meta, ruta_sin_ext)
+
+
+def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
+            source_shape="", pool="", description="", concept_type="generic",
+            tags=None, sample_rate=32000):
+    """Escribe {ruta}.safetensors con UNA referencia, en formato 4.
+
+    Es el formato que leen todas las versiones del nodo. El bundle de version 5
+    solo lo entienden las 0.2.6 en adelante, asi que este sigue siendo el
+    predeterminado. / Version 4 is read by every version of the node; the
+    version-5 bundle needs 0.2.6 or newer, so this stays the default.
+    """
+    meta = _metadatos(latent, kind, name, mode=mode, source=source,
+                      source_shape=source_shape, pool=pool, description=description,
+                      concept_type=concept_type, tags=tags, sample_rate=sample_rate)
+    return _escribir({"latent": latent}, meta, ruta_sin_ext)
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -590,6 +590,15 @@ a stray `.mp3` is ignored by the visual pass and the images by the audio one.
 Output goes straight to `models/refmods`. There is no export step because there
 is nothing to convert: the file the encoder writes **is** the file ComfyUI loads.
 
+**Bundle** writes one `.safetensors` holding both references instead of
+`name_visual` and `name_audio`. It is a container, not a fusion: each reference
+keeps its own tensor and metadata and the loader expands them into independent
+blocks, exactly as two files would. It does **not** bind the voice to the face,
+whatever the name suggests — the format's own spec opens by saying it *"does not
+concatenate audio with visual latents or change H3 conditioning semantics"*. Off
+by default, because a bundle needs ComfyUI-MiniMaxH3Mod 0.2.6 or newer while the
+separate files are read by every version.
+
 ### You do not need the whole model
 
 RefMod never loads the DiT, so the 41 GB NF4 repo is not a prerequisite. If the

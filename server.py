@@ -1534,6 +1534,7 @@ def extract_refmod():
         tok_a = int(data.get("max_tokens_audio", 400) or 0)
         tok_v = int(data.get("max_tokens_visual", 1024) or 0)
         concepto = str(data.get("concept_type", "generic")).strip() or "generic"
+        empaquetar = bool(data.get("bundle", False))
         descripcion = str(data.get("description", "")).strip()
 
         log_tarea("[REFMOD] {} fichero(s) en {}".format(len(fuentes), carpeta))
@@ -1551,7 +1552,7 @@ def extract_refmod():
             audio=kind in ("audio", "both"),
             log=log_tarea)
 
-        escritos, detalles = [], []
+        escritos, detalles, piezas = [], [], []
         import torch
 
         try:
@@ -1566,16 +1567,11 @@ def extract_refmod():
                     if lat is None:
                         detalles.append("audio: ninguna fuente traia pista de audio")
                     else:
-                        ruta = refmod.guardar(
-                            lat, "audio", nombre + "_audio",
-                            str(destino / (nombre + "_audio")),
-                            source="audio", source_shape="x".join(str(x) for x in lat.shape),
+                        piezas.append((lat, "audio", dict(
+                            name=nombre + "_audio", source="audio",
+                            source_shape="x".join(str(x) for x in lat.shape),
                             description=descripcion, concept_type="voice",
-                            tags=usados[:4])
-                        n = refmod.token_count(lat, "audio")
-                        escritos.append(ruta)
-                        detalles.append("audio: {} tokens ({:.2f} s) -> {}"
-                                        .format(n, n / 80.0, ruta))
+                            tags=usados[:4])))
 
             if kind in ("visual", "both"):
                 if not hay_video:
@@ -1591,24 +1587,54 @@ def extract_refmod():
                     detalles.append("visual: ninguna fuente era imagen o video")
                 else:
                     tipo = "image" if int(lat.shape[2]) == 1 else "video"
-                    ruta = refmod.guardar(
-                        lat, tipo, nombre + "_visual",
-                        str(destino / (nombre + "_visual")),
+                    piezas.append((lat, tipo, dict(
+                        name=nombre + "_visual",
                         source="stack" if len(usados) > 1 else tipo,
                         source_shape=" +".join(usados[:6]),
                         pool="full-res {}x{}px".format(int(lat.shape[4]) * 16,
                                                        int(lat.shape[3]) * 16),
                         description=descripcion, concept_type=concepto,
-                        tags=usados[:4])
-                    n = refmod.token_count(lat, tipo)
-                    escritos.append(ruta)
-                    detalles.append("visual: {} tokens ({} latentes de {}x{}) -> {}"
-                                    .format(n, lat.shape[2], lat.shape[3], lat.shape[4], ruta))
+                        tags=usados[:4])))
         finally:
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+
+        # SE ESCRIBE AL FINAL, cuando ya se sabe que hay.
+        #
+        # Un bundle solo puede montarse con todas las piezas delante, asi que la
+        # extraccion las acumula y aqui se decide el formato. De paso arregla algo
+        # que antes quedaba a medias: si el visual fallaba despues de haber
+        # guardado el audio, en la carpeta se quedaba medio par.
+        #
+        # WRITTEN AT THE END, once it is known what there is. A bundle can only be
+        # assembled with every piece in hand, so extraction accumulates them and
+        # the format is chosen here. It also fixes a half-written pair: a visual
+        # failure after the audio was already saved used to leave one orphan file.
+        if empaquetar and len(piezas) > 1:
+            ruta = refmod.guardar_bundle(piezas, nombre, str(destino / nombre))
+            escritos.append(ruta)
+            total = sum(refmod.token_count(l, k) for l, k, _ in piezas)
+            detalles.append("bundle ({} referencias, {} tokens) -> {}"
+                            .format(len(piezas), total, ruta))
+            for lat, tipo, kw in piezas:
+                detalles.append("   {} [{}] {} tokens"
+                                .format(kw["name"], tipo, refmod.token_count(lat, tipo)))
+        else:
+            if empaquetar:
+                detalles.append("bundle omitido: hace falta mas de una referencia")
+            for lat, tipo, kw in piezas:
+                ruta = refmod.guardar(lat, tipo, kw["name"],
+                                      str(destino / kw["name"]),
+                                      **{k: v for k, v in kw.items() if k != "name"})
+                n = refmod.token_count(lat, tipo)
+                escritos.append(ruta)
+                if tipo == "audio":
+                    detalles.append("audio: {} tokens ({:.2f} s) -> {}".format(n, n / 80.0, ruta))
+                else:
+                    detalles.append("visual: {} tokens ({} latentes de {}x{}) -> {}"
+                                    .format(n, lat.shape[2], lat.shape[3], lat.shape[4], ruta))
 
         for d in detalles:
             log_tarea("[REFMOD] " + d)

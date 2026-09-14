@@ -910,6 +910,14 @@
                     </div>
 
                     <div class="form-group">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"
+                               title="Write ONE .safetensors holding both references instead of two (name_audio and name_visual). Only applies when 'Both' produced more than one reference. A bundle is a CONTAINER, not a fusion: each reference keeps its own tensor and metadata and the loader expands them into independent blocks, exactly as two separate files would. It does NOT bind the voice to the face, whatever the name suggests -- the format's own spec says it "does not concatenate audio with visual latents or change H3 conditioning semantics". Off by default because a bundle needs ComfyUI-MiniMaxH3Mod 0.2.6 or newer, while the separate files are read by every version. / Escribe UN solo .safetensors con las dos referencias dentro en vez de dos (name_audio y name_visual). Solo aplica si 'Ambos' produjo mas de una referencia. Un bundle es un CONTENEDOR, no una fusion: cada referencia conserva su propio tensor y sus metadatos, y el cargador las despliega como bloques independientes, igual que harian dos ficheros sueltos. NO ata la voz a la cara, aunque el nombre lo sugiera: su propia especificacion dice que "no concatena el audio con los latentes visuales ni cambia la semantica del conditioning de H3". Desactivado por defecto porque un bundle exige ComfyUI-MiniMaxH3Mod 0.2.6 o posterior, mientras que los ficheros sueltos los lee cualquier version.">
+                            <input type="checkbox" id="refmod_bundle" style="width:auto; margin:0;">
+                            Bundle: un solo fichero / one single file
+                        </label>
+                    </div>
+
+                    <div class="form-group">
                         <label>Description / Descripción (opcional):</label>
                         <input type="text" id="refmod_description" value="" title="Optional text describing the concept ('a ginger woman with messy hair', 'an animation style'). It is stored inside the mod, and the ComfyUI loader emits it on its prompt_hint output merged with the concept type -- "identity: a ginger woman with messy hair" -- so you can concatenate it onto the positive prompt instead of retyping it. IT IS NOT A TRIGGER WORD, AND A REFMOD DOES NOT USE ONE. A trigger exists to give a LoRA a rare token to hang moved weights on; a RefMod moves no weights. Its latent is injected into the conditioning's refs and the DiT attends to it whether or not any particular word appears in the prompt. This is a crib sheet for describing the subject, not a way to invoke the mod: the mod is already acting. / Texto opcional que describe el concepto. Se guarda dentro del mod y el cargador de ComfyUI lo emite por su salida prompt_hint junto al tipo de concepto -- "identity: una mujer pelirroja despeinada" -- para concatenarlo al prompt positivo sin reescribirlo. NO ES UNA PALABRA CLAVE, Y UN REFMOD NO USA NINGUNA. El trigger existe para darle a un LoRA un token raro donde enganchar los pesos que ha movido; un RefMod no mueve ninguno. Su latente se inyecta en los refs del conditioning y el DiT lo atiende aparezca o no una palabra concreta en el prompt. Esto es una chuleta para describir al sujeto, no una forma de invocar el mod: el mod ya esta actuando."
                                placeholder="a ginger woman with messy hair">
@@ -2574,7 +2582,8 @@
                 max_tokens_visual: parseInt(document.getElementById('refmod_tokens_visual').value) || 0,
                 resolution: parseInt(document.getElementById('refmod_resolution').value) || 1024,
                 description: document.getElementById('refmod_description').value.trim(),
-                output: document.getElementById('refmod_output').value.trim()
+                output: document.getElementById('refmod_output').value.trim(),
+                bundle: document.getElementById('refmod_bundle').checked
             };
             if (!cuerpo.name) { alert('Pon un nombre al mod. / Name the mod first.'); return; }
 
