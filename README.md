@@ -539,12 +539,49 @@ conditioning's refs and the DiT attends to it whether or not any particular word
 appears in the prompt — there is nothing to invoke, because the mod is already
 acting. The extractor never reads a caption or loads the text encoder.
 
-The nearest thing is the **Description** field. It is stored in the mod and the
-ComfyUI loader emits it on its `prompt_hint` output, merged with the concept
-type — `identity: a ginger woman with messy hair` — so it can be concatenated
-onto the positive prompt instead of being retyped. Write something that actually
-describes the subject: every mod in the published corpus wastes the field on
-`RefMod dataset <name>`, which tells the prompt nothing.
+The **Description** field is stored in the mod and the ComfyUI loader emits it on
+its `prompt_hint` output, merged with the concept type — `identity: a ginger
+woman with messy hair` — so it can be concatenated onto the positive prompt
+instead of being retyped. Write something that actually describes the subject:
+every mod in the published corpus wastes the field on `RefMod dataset <name>`,
+which tells the prompt nothing. The filename is not a handle either.
+
+### Pointing at one mod out of several
+
+H3 addresses its references positionally. The text encoder weaves a label in
+front of each one at tokenize time — `<Picture 1>`, `<Video 1>`, `<Audio 1>`,
+counted per modality — so a prompt can say:
+
+> The woman in `<Picture 1>` hands a book to the man in `<Picture 2>`.
+
+Which node you use decides whether your mods get those labels, and the two are
+alternatives rather than a chain:
+
+| Node | Labels | When |
+| :--- | :--- | :--- |
+| **Apply H3 RefMod** | none | one dominant concept, or several that answer *different* questions |
+| **H3 RefMod Text Encode** | `<Picture n>` | two or more mods you need to tell apart |
+
+`Apply` injects the latents *after* the prompt has been tokenised, so no label is
+ever emitted for them: the DiT attends to the mods, but the text has no handle on
+any of them. That is fine — and is what the whole published corpus does — as
+long as the mods do not compete. `identity` + `background` + `style` answer three
+different questions and need no arbitration. Two identities do.
+
+**H3 RefMod Text Encode** tokenises the prompt *with* the mods declared, so they
+come in through the same door as native references and receive the same numbering.
+It replaces `Apply`: it attaches the refs itself, and applying the same mods again
+afterwards would inject them twice. Three things to know about it:
+
+* It wants the **video VAE**. A reference the text encoder can read has to be
+  decoded back into pictures for Qwen to see; only audio-only bundles can skip it.
+* Numbering **excludes zero-strength rows**. Muting a slot does not leave a gap,
+  it renumbers everything after it.
+* Connect its `reference_map` output to a text node and it tells you the actual
+  assignment, rather than counting slots by hand.
+
+Keep one concept per file. Stacking two characters inside a single mod gives you
+one latent with no way to separate them again; two files can at least be numbered.
 
 The budget is a ceiling, not a target: four images produce a four-frame mod, not
 a padded one. Mixed folders are fine — each pass takes only what it can use, so
