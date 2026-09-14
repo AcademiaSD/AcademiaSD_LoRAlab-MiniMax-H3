@@ -590,26 +590,34 @@ being spelled aloud before the dialogue.
 
 Two forms avoid both. Declaring the binding explicitly is the better one, since
 it lets the rest of the prompt read naturally. The convention is not invented:
-`ref_image_1`, `ref_video_1` and `ref_audio_1` are the names of the native
+`ref_image_0`, `ref_video_0` and `ref_audio_0` are the names of the native
 reference inputs, and MiniMax understands them because they are its own. Users
 apply it in the NATIVE reference workflow; that it carries over to RefMods, which
 reach the model by a different path, is what was verified here.
 
+**Number them from zero.** The native inputs are `ref_audio_0`, `ref_video_0`,
+so `_0` is the spelling the model actually saw and `_1` for the first reference
+is off by one. Switching to zero-based visibly reduced misassignment.
+
 ```
-@ref_image_1 as Ana, realistic person, natural human appearance.
-@ref_image_2 as Marco, realistic person, natural human appearance.
-@ref_audio_1 as Ana voice.
-@ref_audio_2 as Marco voice.
+subject_definitions:
+@ref_video_0 as Ana, realistic person, natural human appearance.
+@ref_video_1 as Marco, realistic person, natural human appearance.
+@ref_audio_0 as Ana voice.
+@ref_audio_1 as Marco voice.
 ```
+
+Bind once at the top, then use the bare name in the body — `Marco is the only
+one speaking. Ana listens in silence.` The binding is what stops the name
+pulling in a prior, so it does not need repeating.
 
 Referring to `<Subject 1>` and `<Subject 2>` directly, with no names anywhere,
-works too and is shown in the example below.
+works too and is shown in the example below. Note those stay **one-based**: they
+are ordinary prose describing your own subject list, not input names.
 
 Spell it exactly. `@ref_video1` -- no underscore -- broke the voice pairing
-across two seeds and had the model speak a stray word in its default voice.
-`ref_video_1` is a perfectly good native input name, so the missing underscore is
-the likely culprit rather than the word, though that was not isolated. None of
-these strings is a token either way: H3 knows `<d>`, `</d>`, `<|cutoff|>`,
+across two seeds and had the model speak a stray word in its default voice. None
+of these strings is a token either way: H3 knows `<d>`, `</d>`, `<|cutoff|>`,
 `<|lyrics_start|>` and a few more, and reads everything else as language -- which
 is exactly why a string it half-recognises can do something and a malformed one
 can do something else.
@@ -719,16 +727,21 @@ splits finer still, because each pass downloads only its own:
 That is 14 % of the full repo. Someone who only wants to extract references
 never has to fetch the 35 GB of transformer they will not use.
 
-### Audio: use the native node instead
+### Audio: it depends on the partition
 
 An audio RefMod is written correctly — its latent decodes back to the source
-voice at **0.97** time correlation and **0.99** spectral — and it still does not
-work. It becomes a standalone `audio` ref block that the model places on its own
-temporal cursor, bound to no identity, and the generated voice does not resemble
-the reference.
+voice at **0.97** time correlation and **0.99** spectral — but whether the model
+*uses* it depends on which partition you load.
 
-H3's real audio reference path is the **native `MiniMaxH3ReferenceToVideo`
-node**:
+On **Ref2VA** it works, with the positional layout described above: one visual
+and one audio reference reproduce the right voice on the right face, and voice
+transfer across identities works too.
+
+On **FL2VA** it does not. The same file becomes a standalone `audio` ref block
+that the model places on its own temporal cursor, bound to no identity, and the
+generated voice does not resemble the reference. If that is the partition you
+are on, or if you want a voice tied to picture with no ambiguity at all, the
+**native `MiniMaxH3ReferenceToVideo` node** is the stronger path:
 
 * `ref_audios.ref_audio_0` for a voice on its own (it needs a Trim node wired to
   `duration`).
@@ -736,12 +749,14 @@ node**:
   `ref_video_audios.ref_video_audio_N`, which emits the `video_audio` block where
   sound and picture share one temporal origin.
 
-That pairing is the binding a RefMod cannot express: its `ref_block()` always
-writes `ref_audio_t: 0` and `audio_latent: None` for anything visual. The native
-node also declares its references **at tokenize time**
+That pairing is a binding a RefMod cannot express at all: its `ref_block()`
+always writes `ref_audio_t: 0` and `audio_latent: None` for anything visual, so
+a RefMod voice is never welded to a RefMod face — it is matched by position and
+nothing more. The native node also declares its references **at tokenize time**
 (`clip.tokenize(prompt, minimax_ref_items=...)`), so the text encoder knows they
 exist; a RefMod is injected afterwards, with the text conditioning already
-closed.
+closed. That difference is the likely reason two RefMod voices can cross while
+the native pairing does not.
 
 > **Note on a third-party extractor.** `ComfyUI-MiniMaxH3Mod`'s
 > `snap_to_causal_grid` trims reference videos to `4k+1`, claiming H3's video VAE
