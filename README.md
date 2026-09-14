@@ -564,6 +564,13 @@ slot 3   subject A   audio         ->  <Subject 1>'s voice
 slot 4   subject B   audio         ->  <Subject 2>'s voice
 ```
 
+**RefMods and the workflow's own references share one numbering.** `Apply`
+appends its latents to the same `minimax_refs` list the native image and audio
+reference inputs feed, so they are not separate channels. Two native image
+references plus one RefMod makes the RefMod `<Subject 3>`, not `<Subject 1>`.
+If you mix the two, count them together -- and if you can, do not mix them at
+all: everything measured here used RefMods alone.
+
 **All the visuals first, then all the audio.** Interleaving them shifts the
 positions and the pairing comes apart.
 
