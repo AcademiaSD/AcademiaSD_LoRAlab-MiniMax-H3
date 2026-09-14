@@ -903,9 +903,10 @@
                                    oninput="refmodEstimate()" title="Token budget for the visual mod. One token covers 32x32 real pixels: a 512x512 still is 256 tokens, a 1024x1024 one is 1,024. The default comes from the published corpus rather than from theory -- 1,480 RefMods on HuggingFace, sampled headers showing 22 stills at 512px (5,632 tokens) or 8 at 1024px (8,192). Identity is built from MANY VARIED STILLS, not from video frames. Spend the budget either way: few sharp frames or many small ones. Beware that this is paid on every step of every generation -- a 192x192 clip of 124 frames is only 1,332 tokens, so a 5,632 token mod is four times the video you generate, and attention cost grows with the square of the sequence. Over budget, near-duplicate frames are dropped first and the rest resampled. / Presupuesto de tokens del mod visual. Un token cubre 32x32 pixeles reales: una imagen de 512x512 son 256 tokens y una de 1024x1024 son 1.024. El valor por defecto sale del corpus publicado, no de la teoria: 1.480 RefMods en HuggingFace, y las cabeceras muestreadas dan 22 stills a 512px (5.632 tokens) u 8 a 1024px (8.192). La identidad se construye con MUCHAS IMAGENES FIJAS VARIADAS, no con fotogramas de video. El presupuesto se gasta de las dos formas: pocos fotogramas nitidos o muchos pequenos. Ojo, esto se paga en cada paso de cada generacion -- un clip de 192x192 y 124 fotogramas son solo 1.332 tokens, asi que un mod de 5.632 es cuatro veces el video que generas, y el coste de la atencion crece con el cuadrado de la secuencia. Si te pasas, primero se tiran los fotogramas casi duplicados y el resto se remuestrea.">
                         </div>
                         <div class="form-group">
-                            <label>Resolution / Resolución:</label>
-                            <input type="number" id="refmod_resolution" value="1024" min="128" step="64"
-                                   title="Short edge of the reference before encoding, and it only DOWNSCALES -- it never enlarges. This is NOT the training resolution from panel 1: there you train at 192 or 256 because the cost is per step and there are thousands of steps, here the encode happens ONCE, so detail is cheap and 1024 is the sensible default. Identity lives in that detail. What you watch here is the token count, not this number. / Lado corto de la referencia antes de codificar, y solo REDUCE, nunca amplia. NO es la resolucion de entrenamiento del panel 1: alli entrenas a 192 o 256 porque el coste es por paso y son miles de pasos, aqui el encode se hace UNA vez, asi que el detalle sale barato y 1024 es el valor sensato. La identidad vive en ese detalle. Lo que hay que vigilar aqui es el recuento de tokens, no este numero.">
+                            <label>Resolution / Resolución (lado largo / long edge):</label>
+                            <input type="number" id="refmod_resolution" value="512" min="128" step="64"
+                                   oninput="refmodEstimate()"
+                                   title="Caps the LONG edge of each reference before encoding, and only DOWNSCALES. The long edge, not the short one, because what costs VRAM is the AREA and the short edge is the dimension that does not bound it: a 1:2 image at short edge 1024 would encode at 1024x2048, and a 1:3 panorama at 1024x3072. Measured peak on a 5080: 0.37 GB of VAE weights plus 2.82 GB per megapixel, so 512 costs 1.1 GB and 1024 costs 3.3. Frame count barely matters -- each frame is encoded on its own. This is NOT the training resolution from panel 1: there you train at 192 or 256 because the cost is per step across thousands of steps; here the encode happens once. 512 is what most of the published corpus uses. / Limita el lado LARGO de cada referencia antes de codificar, y solo REDUCE. El lado largo y no el corto porque lo que cuesta VRAM es el AREA, y el lado corto es justo la dimension que no la acota: una imagen 1:2 con lado corto 1024 se codificaria a 1024x2048, y un panoramico 1:3 a 1024x3072. Pico medido en una 5080: 0,37 GB de pesos del VAE mas 2,82 GB por megapixel, asi que 512 cuesta 1,1 GB y 1024 cuesta 3,3. El numero de fotogramas apenas influye: cada uno se codifica por separado. NO es la resolucion de entrenamiento del panel 1: alli el coste es por paso y son miles de pasos, aqui el encode se hace una vez. 512 es lo que usa la mayoria del corpus publicado.">
                         </div>
                     </div>
 
@@ -2568,7 +2569,18 @@
             // que se genera es mas util que el numero suelto.
             // The reference is paid on EVERY generation, so comparing it with what
             // you generate is more useful than the bare number.
-            partes.push(`<b>${total}</b> tok a\u00f1adidos a cada generaci\u00f3n / added to every generation`);
+            // El pico de la EXTRACCION, que no tiene nada que ver con los tokens:
+            // depende del area de un fotograma. 0,37 GB de pesos del VAE mas
+            // 2,82 por megapixel, medido. Se enseña aquí porque es justo el
+            // numero que hacia que la extraccion tumbara la maquina sin avisar.
+            // The EXTRACTION peak, unrelated to tokens: it depends on one
+            // frame's area. Measured at 0.37 GB of VAE weights plus 2.82 per
+            // megapixel. Shown here because it is the number that used to take
+            // the machine down without warning.
+            const lado = parseInt(document.getElementById('refmod_resolution').value) || 512;
+            const picoGb = 0.37 + 2.82 * (lado * lado / 1e6);
+            partes.push(`<b>${total}</b> tok añadidos a cada generación / added to every generation`);
+            partes.push(`extraer: ~${picoGb.toFixed(1)} GB de VRAM / to extract`);
             el.innerHTML = partes.join(' &nbsp;\u00b7&nbsp; ');
         }
 

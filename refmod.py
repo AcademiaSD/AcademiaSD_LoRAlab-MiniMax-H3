@@ -94,18 +94,6 @@ AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 # second and channel -> 80 tokens/s.
 TOKENS_POR_SEGUNDO_AUDIO = 80
 
-# El encode de audio se hace POR TROZOS, y el tamano no es arbitrario: 10 s son
-# 400 latentes por canal = 320.000 muestras, multiplo exacto del hop de 800 del
-# VAE. Un trozo que no cuadre con el hop deja un resto que el encoder rellena, y
-# los latentes de dos trozos consecutivos ya no encajan al concatenarlos.
-#
-# Chunked audio encode. 10 s = 400 latents per channel = 320,000 samples, an
-# exact multiple of the VAE's 800-sample hop. A chunk that does not line up with
-# the hop leaves a remainder the encoder pads, and consecutive chunks stop
-# meeting cleanly when concatenated.
-SEGUNDOS_TROZO_AUDIO = 10.0
-MUESTRAS_TROZO_AUDIO = int(SEGUNDOS_TROZO_AUDIO * 40) * 800
-
 _PRECACHE = None
 
 
@@ -301,51 +289,23 @@ def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
 # Audio
 # ══════════════════════════════════════════════════════════════════════════
 
-def _encode_audio_troceado(P, vae, pcm):
-    """[2, N] -> [1, 32, 2, T] codificando por trozos. / chunked encode.
-
-    POR QUE TROCEAR. encode_audio_latent() manda a la GPU lo que se le de, de una
-    vez. Medido en una 5080: unos 0,1 GB de pico por segundo de audio, asi que un
-    fichero de diez minutos pedia ~60 GB y la tarjeta se iba a memoria compartida
-    -- si es que no reventaba antes. Troceado, el pico deja de depender de lo que
-    dure el fichero.
-
-    WHY CHUNK. encode_audio_latent() sends whatever it is given to the GPU in one
-    go: measured at ~0.1 GB of peak per second of audio, so a ten-minute file
-    asked for ~60 GB. Chunked, the peak stops depending on the file's length.
-    """
-    trozos = []
-    for i in range(0, pcm.shape[1], MUESTRAS_TROZO_AUDIO):
-        parte = pcm[:, i:i + MUESTRAS_TROZO_AUDIO]
-        if parte.shape[1] < 800:          # menos de un hop: no da ni un latente
-            break
-        z = P.encode_audio_latent(vae, parte)          # [1, 32, 2t] canal-mayor
-        if z.ndim != 3 or z.shape[1] != 32 or z.shape[2] % 2:
-            return None
-        t = z.shape[2] // 2
-        trozos.append(z.reshape(1, 32, 2, t).float())
-    return torch.cat(trozos, dim=-1) if trozos else None
-
-
-def extraer_audio(fuentes, audio_vae, max_tokens=1024, log=print):
+def extraer_audio(fuentes, audio_vae, max_tokens=400, log=print):
     """Latente [1, 32, 2, T] a partir de las fuentes con pista de audio.
 
-    Se recorta ANTES de codificar, no despues. Parece un detalle y no lo es: la
-    version anterior codificaba el fichero entero y luego se quedaba con los
-    primeros T latentes, asi que con un tope de 1.024 tokens -- 12,8 segundos --
-    un mp3 de diez minutos pasaba entero por la GPU para tirar el 98%.
+    Las referencias se concatenan en el tiempo y se recorta al presupuesto. Se
+    recorta por el FINAL y no se remuestrea: un latente de audio remuestreado no
+    suena mas corto, suena mal.
 
-    Trimmed BEFORE encoding, not after. The previous version encoded the whole
-    file and then kept the first T latents, so with a 1,024 token budget -- 12.8
-    seconds -- a ten-minute mp3 went through the GPU in full to throw away 98%.
+    [1, 32, 2, T] from whichever sources carry audio. References are
+    concatenated in time and cut to budget from the END rather than resampled:
+    a resampled audio latent does not sound shorter, it sounds wrong.
     """
     P = precache()
-    trozos, usados = [], []
+    trozos = []
+    usados = []
     tope_latentes = max(1, max_tokens // 2) if max_tokens else None
 
     for ruta in fuentes:
-        if tope_latentes and sum(x.shape[-1] for x in trozos) >= tope_latentes:
-            break
         ext = os.path.splitext(ruta)[1].lower()
         if ext not in AUDIO_EXTS + VIDEO_EXTS:
             continue
@@ -353,24 +313,30 @@ def extraer_audio(fuentes, audio_vae, max_tokens=1024, log=print):
             dur = P.audio_duration(ruta)
             if not dur or dur <= 0:
                 continue
-            if tope_latentes:
-                # Lo que falta para llenar el presupuesto, a 40 latentes/s, con
-                # un segundo de margen para no quedarse corto por redondeo.
-                # What is left to fill the budget at 40 latents/s, plus a second
-                # of margin so rounding cannot fall short.
-                falta = tope_latentes - sum(x.shape[-1] for x in trozos)
-                dur = min(dur, falta / 40.0 + 1.0)
+            # read_audio_pcm pide el audio en fotogramas de video a 24 fps: se
+            # le pasa la duracion real del fichero, no una geometria de
+            # entrenamiento, porque aqui no hay clip que sincronizar.
+            # read_audio_pcm asks for audio in 24 fps video frames: the file's
+            # real duration is passed, not a training geometry -- there is no
+            # clip to stay in sync with here.
             frames = max(1, int(round(dur * 24.0)))
             pcm = P.read_audio_pcm(ruta, frames, 24.0)
             if pcm is None or pcm.size == 0:
                 continue
-            z = _encode_audio_troceado(P, audio_vae, pcm)
-            if z is None:
-                log("[REFMOD] {}: could not encode, skipped / no se pudo codificar, "
-                    "se salta".format(os.path.basename(ruta)))
+            z = P.encode_audio_latent(audio_vae, pcm)     # [1, 32, 2T]
+            if z.ndim != 3 or z.shape[1] != 32 or z.shape[2] % 2:
+                log("[REFMOD] {}: unexpected latent {}, skipped / latente "
+                    "inesperado, se salta".format(os.path.basename(ruta), tuple(z.shape)))
                 continue
-            trozos.append(z)
-            usados.append("{} ({:.2f}s)".format(os.path.basename(ruta), z.shape[-1] / 40.0))
+            t = z.shape[2] // 2
+            # [1,32,2T] canal-mayor -> [1,32,2,T]. El orden coincide: las
+            # primeras T posiciones son el canal izquierdo.
+            # Channel-major [1,32,2T] -> [1,32,2,T]; the first T positions are
+            # the left channel, which is what the node expects.
+            trozos.append(z.reshape(1, 32, 2, t).float())
+            usados.append("{} ({:.2f}s)".format(os.path.basename(ruta), t / 40.0))
+            if tope_latentes and sum(x.shape[-1] for x in trozos) >= tope_latentes:
+                break
         except Exception as exc:
             log("[REFMOD] {}: {}".format(os.path.basename(ruta), exc))
 
@@ -379,10 +345,10 @@ def extraer_audio(fuentes, audio_vae, max_tokens=1024, log=print):
 
     latente = torch.cat(trozos, dim=-1)
     if tope_latentes and latente.shape[-1] > tope_latentes:
-        # Se recorta por el FINAL y no se remuestrea: un latente de audio
-        # remuestreado no suena mas corto, suena mal.
-        # Cut from the END rather than resampled: a resampled audio latent does
-        # not sound shorter, it sounds wrong.
+        log("[REFMOD] audio: {} latents -> {} to fit the {} token budget / {} "
+            "latentes -> {} por el presupuesto de {} tokens"
+            .format(latente.shape[-1], tope_latentes, max_tokens,
+                    latente.shape[-1], tope_latentes, max_tokens))
         latente = latente[..., :tope_latentes].clone()
     return latente.to(torch.float16), usados
 
@@ -425,18 +391,88 @@ def _medidas(ruta, P):
         return 1, 0, 0
 
 
-def _lienzo(ruta, short_edge, P):
-    """(ancho, alto) multiplos de 32, lado corto <= short_edge, SOLO reduce.
+# Pico de VRAM al codificar, medido en una 5080 con el VAE en bf16:
+#
+#     192x192  1,55 GB      384x384  5,08 GB
+#     256x256  2,46 GB      512x512  8,73 GB
+#     320x320  3,64 GB
+#
+#     pico ~= 0,37 + 31,9 x megapixeles     (error de centesimas)
+#
+# La constante son los pesos del VAE; todo lo demas son activaciones del
+# encoder, PROPORCIONALES AL AREA DE UN FOTOGRAMA. Medido tambien: el numero de
+# fotogramas casi no influye -- 5 fotogramas cuestan 8,68 GB y 73 cuestan 8,89,
+# porque el encoder ya trocea en el tiempo de 17 en 17. Lo que no trocea es el
+# espacio, al reves que el VAE de ComfyUI, que usa baldosas de ~256 px.
+#
+# Peak VRAM when encoding, measured on a 5080: the constant is the VAE weights
+# and the rest is encoder activations PROPORTIONAL TO ONE FRAME'S AREA. Frame
+# count barely matters (5 frames 8.68 GB, 73 frames 8.89) because the encoder
+# already chunks in time; what it never chunks is space.
+VRAM_BASE_GB = 0.37
+VRAM_POR_MPX = 31.9          # ruta de video (encode_clip_latent)
+VRAM_POR_MPX_IMG = 2.82      # ruta de imagen (encode_video_latent)
 
-    Nunca amplia: agrandar una referencia no le anade detalle, solo tokens, y
-    los tokens se pagan en cada generacion.
-    Never upscales: enlarging a reference adds no detail, only tokens, and
-    tokens are paid on every generation.
+# Tope de fotogramas que se leen de un clip antes de muestrear. 124 a 512x512
+# son ~97 MB en uint8: cabe de sobra y evita leer un clip de diez minutos entero
+# para quedarse con seis fotogramas.
+# Frames read from a clip before sampling. 124 at 512x512 is ~97 MB in uint8.
+MAX_FRAMES_LEIDOS = 124
+
+
+def _frames_repartidos(P, ruta, cuantos, ancho, alto, disponible):
+    """`cuantos` fotogramas REPARTIDOS por todo el clip, no los primeros.
+
+    Coger fotogramas consecutivos da casi la misma vista repetida, que es lo
+    que menos aporta a una identidad. Repartidos por la duracion salen angulos,
+    expresiones y luces distintas -- la variedad es lo que separa al sujeto de
+    la toma concreta, igual que pasaba con los videos ancla del entrenamiento.
+
+    `cuantos` frames SPREAD across the clip rather than the first ones.
+    Consecutive frames are nearly the same view repeated, which is what helps an
+    identity least; spread out they give different angles, expressions and
+    lighting, and that variety is what separates the subject from the shot.
+    """
+    n = min(disponible or MAX_FRAMES_LEIDOS, MAX_FRAMES_LEIDOS)
+    fr = P.read_video_frames(ruta, n, ancho, alto)
+    total = int(fr.shape[0])
+    if cuantos >= total:
+        return fr
+    idx = torch.linspace(0, total - 1, cuantos).round().long()
+    return fr[idx]
+
+
+def pico_vram_estimado(ancho, alto, por_imagen=True):
+    """GB que va a pedir codificar un fotograma de ese tamano.
+
+    Dos pendientes porque son dos rutas distintas del VAE, medidas por separado.
+    Two slopes because they are two different VAE paths, measured separately.
+    """
+    mpx = float(ancho) * float(alto) / 1e6
+    return VRAM_BASE_GB + (VRAM_POR_MPX_IMG if por_imagen else VRAM_POR_MPX) * mpx
+
+
+def _lienzo(ruta, lado_max, P):
+    """(ancho, alto) multiplos de 32, lado LARGO <= lado_max, SOLO reduce.
+
+    EL LADO LARGO, NO EL CORTO. El extractor oficial acota el lado corto porque
+    es como redimensiona el camino nativo de referencia de H3. Copiarlo fue un
+    error aqui: lo que cuesta VRAM es el AREA, y el lado corto es justo la
+    dimension que no la acota. Una imagen 1:2 con lado corto 1024 se codifica a
+    1024x2048 -- 2,1 megapixeles, 67 GB -- y un panoramico 1:3 se va a 100.
+    Acotando el lado largo, ese mismo 1:2 queda en 512x1024 y 17 GB.
+    Nunca amplia: agrandar una referencia no anade detalle, solo coste.
+
+    THE LONG EDGE, NOT THE SHORT ONE. The official extractor caps the short edge
+    because that is how H3's native reference path resizes. Copying it was wrong
+    here: area is what costs VRAM, and the short edge is precisely the dimension
+    that does not bound it -- a 1:2 image at short edge 1024 encodes at
+    1024x2048, 2.1 megapixels, 67 GB.
     """
     _, w, h = _medidas(ruta, P)
     if not w or not h:
-        w = h = short_edge
-    escala = min(1.0, float(short_edge) / float(min(w, h)))
+        w = h = lado_max
+    escala = min(1.0, float(lado_max) / float(max(w, h)))
     return (max(32, int(round(w * escala / 32)) * 32),
             max(32, int(round(h * escala / 32)) * 32))
 
@@ -461,10 +497,47 @@ def extraer_visual(fuentes, video_vae, resolution=1024, max_tokens=1024, log=pri
     if por_frame <= 0:
         raise ValueError("Lienzo invalido {}x{}".format(ancho, alto))
     tope_t = max(1, max_tokens // por_frame) if max_tokens else None
-    log("[REFMOD] canvas {}x{} px = {} tokens per latent frame{} / lienzo, "
-        "tokens por fotograma latente"
-        .format(ancho, alto, por_frame,
-                "; {} fit / caben".format(tope_t) if tope_t else ""))
+    log("[REFMOD] canvas {}x{} px = {} tokens/frame | estimated peak {:.1f} GB{} "
+        "/ lienzo, tokens por fotograma, pico estimado"
+        .format(ancho, alto, por_frame, pico_vram_estimado(ancho, alto, True),
+                "; {} latents fit / latentes caben".format(tope_t) if tope_t else ""))
+
+    # EL PRESUPUESTO SE REPARTE, NO SE AGOTA EN EL PRIMERO.
+    #
+    # Antes se recorria la lista gastando todo lo que hiciera falta en cada
+    # fuente hasta llenar: con 5.632 tokens y un clip delante, ese clip se
+    # llevaba los 22 latentes -- 73 fotogramas seguidos del mismo plano -- y las
+    # imagenes que venian detras no se codificaban jamas. Malo por dos motivos a
+    # la vez: 73 fotogramas consecutivos son casi la misma vista repetida, y la
+    # identidad se construye precisamente con vistas VARIADAS.
+    #
+    # Ahora cada imagen reserva su latente (una imagen es un fotograma latente y
+    # no admite mas) y lo que sobra se divide entre los videos.
+    #
+    # THE BUDGET IS SHARED, NOT EATEN BY THE FIRST SOURCE. The old loop spent
+    # whatever each source needed until full, so one clip took all 22 latents --
+    # 73 consecutive frames of the same shot -- and the images behind it were
+    # never encoded. Wrong twice over: consecutive frames are nearly the same
+    # view repeated, and identity is built from VARIED ones.
+    imagenes = [r for r in visuales if os.path.splitext(r)[1].lower() in IMAGE_EXTS]
+    videos = [r for r in visuales if r not in imagenes]
+    cupo_video = None
+    if tope_t:
+        # Cada imagen cuesta exactamente 1 latente. Si no caben todas, se
+        # quedan las primeras y los videos no entran.
+        # Each image costs exactly 1 latent.
+        reservado = min(len(imagenes), tope_t)
+        resto = tope_t - reservado
+        if videos:
+            # Un latente por fotograma, asi que el cupo ya no tiene que caer en
+            # la rejilla 17n+5: cualquier numero >= 1 vale y el presupuesto se
+            # aprovecha entero.
+            # One latent per frame, so the quota no longer has to land on the
+            # 17n+5 grid: any number >= 1 works and the budget is fully used.
+            cupo_video = resto // len(videos) if resto >= 1 else 0
+        log("[REFMOD] share: {} image(s) at 1 latent + {} video(s) at {} latents "
+            "/ reparto: imagenes a 1 latente, videos a N latentes"
+            .format(reservado, len(videos), cupo_video if cupo_video else 0))
 
     trozos, usados = [], []
     for ruta in visuales:
@@ -488,17 +561,47 @@ def extraer_visual(fuentes, video_vae, resolution=1024, max_tokens=1024, log=pri
                 # How many PIXEL frames the remaining latent budget allows.
                 # h3_pixel_frames is the exact inverse of the grid, so there is
                 # nothing to guess: 5n+2 latents <- 17n+5 pixels.
-                objetivo = 0
-                if tope_t:
-                    objetivo = P.h3_pixel_frames(max(2, tope_t - puestos))
-                pedidos = P.h3_valid_frames(disponible, objetivo)
-                if not pedidos:
-                    log("[REFMOD] {}: only {} frames, below the 17n+5 grid's floor of 5; "
-                        "skipped / solo {} fotogramas, por debajo del minimo de 5"
-                        .format(nombre, disponible, disponible))
+                # FOTOGRAMA A FOTOGRAMA, POR LA RUTA DE IMAGEN.
+                #
+                # Medido a 512x512 con los mismos 5 fotogramas de origen:
+                #     encode_clip_latent  (los 5 juntos) -> 2 latentes, 8,68 GB
+                #     encode_video_latent (uno a uno)    -> 5 latentes, 1,11 GB
+                #
+                # Ocho veces menos memoria y mas del doble de latentes. El
+                # encoder de video rellena hasta 17 fotogramas cuando no llegan,
+                # asi que pedirle 5 cuesta lo mismo que pedirle 17; y ademas
+                # comprime el tiempo (17 -> 5) y descarta 3 latentes de cola.
+                # Nada de eso interesa en una referencia: aqui cada fotograma
+                # vale por si mismo, y la rejilla 17n+5 deja de aplicar.
+                #
+                # Lo que se pierde es la informacion TEMPORAL: el clip se
+                # convierte en una pila de fotogramas sueltos. Para identidad es
+                # exactamente lo que se quiere, y es lo que hacen los 1.480
+                # refmods publicados; solo importaria para un concepto de
+                # movimiento.
+                #
+                # FRAME BY FRAME, THROUGH THE IMAGE PATH. Measured at 512x512 on
+                # the same 5 source frames: the video path gives 2 latents for
+                # 8.68 GB, one-at-a-time gives 5 latents for 1.11 GB. The video
+                # encoder pads to 17 frames when given fewer, compresses time and
+                # drops 3 trailing latents -- none of which a reference wants.
+                # What is lost is temporal information: the clip becomes a stack
+                # of stills, which is what identity wants and what the published
+                # corpus does.
+                cuantos = cupo_video if cupo_video is not None else (
+                    max(1, tope_t - puestos) if tope_t else 8)
+                if cuantos < 1:
+                    log("[REFMOD] {}: no quota left, skipped / sin cupo, se salta"
+                        .format(nombre))
                     continue
-                frames = P.read_video_frames(ruta, pedidos, ancho, alto)
-                z = P.encode_clip_latent(video_vae, frames).float()     # [1,24,T,h,w]
+                frames = _frames_repartidos(P, ruta, cuantos, ancho, alto, disponible)
+                from PIL import Image
+                import numpy as _np
+                trozos_f = []
+                for i in range(int(frames.shape[0])):
+                    img = Image.fromarray(frames[i].cpu().numpy().astype(_np.uint8))
+                    trozos_f.append(P.encode_video_latent(video_vae, img).float())
+                z = torch.cat(trozos_f, dim=2)                          # [1,24,T,h,w]
 
             trozos.append(z)
             usados.append("{} -> {} latentes de {}x{}".format(
