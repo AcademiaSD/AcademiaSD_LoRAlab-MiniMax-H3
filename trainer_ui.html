@@ -357,7 +357,7 @@
         <div class="sidebar">
             
             <!-- 0. Hugging Face Token Panel (CERRADO POR DEFECTO) -->
-            <div class="panel collapsed">
+            <div id="pnl_hf" class="panel collapsed">
                 <div class="panel-title" onclick="togglePanel(this)">
                     <span>Hugging Face Token (Optional / Opcional)</span>
                     <span class="toggle-icon">▼</span>
@@ -374,7 +374,7 @@
             </div>
 
             <!-- 1. Pre-Cache Settings Panel (ABIERTO POR DEFECTO) -->
-            <div class="panel">
+            <div id="pnl_precache" class="panel">
                 <div class="panel-title" onclick="togglePanel(this)">
                     <span>1. Pre-Cache Settings / Config. Pre-Caché</span>
                     <span class="toggle-icon">▲</span>
@@ -490,7 +490,7 @@
             </div>
 
             <!-- 2. Training Settings Panel (ABIERTO POR DEFECTO) -->
-            <div class="panel">
+            <div id="pnl_train" class="panel">
                 <div class="panel-title" onclick="togglePanel(this)">
                     <div style="display:flex; align-items:center; gap:8px;">
                         <span>2. Training Settings / Config. Entrenamiento</span>
@@ -807,7 +807,7 @@
             </div>
 
             <!-- 3. Export to WebUI Models Panel (ABIERTO POR DEFECTO) -->
-            <div class="panel">
+            <div id="pnl_export" class="panel">
                 <div class="panel-title" onclick="togglePanel(this)">
                     <span>3. Export to WebUI / Enviar a Models</span>
                     <span class="toggle-icon">▲</span>
@@ -847,7 +847,7 @@
                  pre-cache entirely -- no captions, no trigger word, no 32B text
                  encoder, just the VAE. A number would imply a sequence it is not
                  part of. -->
-            <div class="panel panel-refmod collapsed">
+            <div id="pnl_refmod" class="panel panel-refmod collapsed">
                 <div class="panel-title" onclick="togglePanel(this)">
                     <span>RefMod / Referencia directa &mdash; sin entrenamiento</span>
                     <span class="toggle-icon">▼</span>
@@ -2568,6 +2568,41 @@
                                'refmod_tokens_visual', 'refmod_resolution',
                                'refmod_description'];
 
+        // Que paneles quedan desplegados. Se guarda con el JSON de RefMod porque
+        // es el unico fichero de ajustes que no es el contrato de entrada de un
+        // script: pre_cache_settings y train_settings los LEE Python, y meterles
+        // una clave de interfaz seria colarle basura a un script.
+        // Which panels are left open. It rides in the RefMod JSON because that is
+        // the only settings file which is not a script's input contract:
+        // pre_cache_settings and train_settings are READ BY Python, and a UI key
+        // in those would be junk handed to a script.
+        const PANELES = ['pnl_hf', 'pnl_precache', 'pnl_train', 'pnl_export', 'pnl_refmod'];
+
+        function estadoPaneles() {
+            const out = {};
+            PANELES.forEach(function (id) {
+                const el = document.getElementById(id);
+                if (el) out[id] = !el.classList.contains('collapsed');
+            });
+            return out;
+        }
+
+        function aplicarEstadoPaneles(estado) {
+            if (!estado) return;
+            PANELES.forEach(function (id) {
+                if (estado[id] === undefined) return;
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.classList.toggle('collapsed', !estado[id]);
+                // El icono no se deduce solo de la clase: hay que reescribirlo, o
+                // la flecha acaba contradiciendo al panel.
+                // The icon does not follow the class on its own -- rewrite it, or
+                // the arrow ends up contradicting the panel.
+                const icon = el.querySelector('.panel-title .toggle-icon');
+                if (icon) icon.innerText = estado[id] ? '▲' : '▼';
+            });
+        }
+
         async function saveRefmodSettings() {
             const datos = {};
             REFMOD_CAMPOS.forEach(function (id) {
@@ -2576,6 +2611,7 @@
             });
             const bundle = document.getElementById('refmod_bundle');
             if (bundle) datos.refmod_bundle = bundle.checked;
+            datos.panels_open = estadoPaneles();
             try {
                 const res = await fetch('/api/save-refmod', { method: 'POST', body: JSON.stringify(datos) });
                 const data = await res.json();
@@ -2599,6 +2635,10 @@
         // follow the dataset again on a project change.
         function aplicarRefmodGuardado(r) {
             if (!r) return;
+            // Nada mas abajo se ejecuta si el fichero solo trae panels_open, asi
+            // que el bucle de campos tiene que tolerar claves ausentes -- lo hace.
+            // Nothing below runs if the file only carries panels_open, so the
+            // field loop has to tolerate missing keys -- it does.
             REFMOD_CAMPOS.forEach(function (id) {
                 if (r[id] === undefined || r[id] === '') return;
                 const el = document.getElementById(id);
@@ -2610,6 +2650,7 @@
                 const bundle = document.getElementById('refmod_bundle');
                 if (bundle) bundle.checked = !!r.refmod_bundle;
             }
+            aplicarEstadoPaneles(r.panels_open);
             refmodEstimate();
         }
 
