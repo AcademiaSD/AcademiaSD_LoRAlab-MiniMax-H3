@@ -94,6 +94,18 @@ AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 # second and channel -> 80 tokens/s.
 TOKENS_POR_SEGUNDO_AUDIO = 80
 
+# El encode de audio se hace POR TROZOS, y el tamano no es arbitrario: 10 s son
+# 400 latentes por canal = 320.000 muestras, multiplo exacto del hop de 800 del
+# VAE. Un trozo que no cuadre con el hop deja un resto que el encoder rellena, y
+# los latentes de dos trozos consecutivos ya no encajan al concatenarlos.
+#
+# Chunked audio encode. 10 s = 400 latents per channel = 320,000 samples, an
+# exact multiple of the VAE's 800-sample hop. A chunk that does not line up with
+# the hop leaves a remainder the encoder pads, and consecutive chunks stop
+# meeting cleanly when concatenated.
+SEGUNDOS_TROZO_AUDIO = 10.0
+MUESTRAS_TROZO_AUDIO = int(SEGUNDOS_TROZO_AUDIO * 40) * 800
+
 _PRECACHE = None
 
 
@@ -289,23 +301,51 @@ def guardar(latent, kind, name, ruta_sin_ext, mode="encode", source="",
 # Audio
 # ══════════════════════════════════════════════════════════════════════════
 
-def extraer_audio(fuentes, audio_vae, max_tokens=400, log=print):
+def _encode_audio_troceado(P, vae, pcm):
+    """[2, N] -> [1, 32, 2, T] codificando por trozos. / chunked encode.
+
+    POR QUE TROCEAR. encode_audio_latent() manda a la GPU lo que se le de, de una
+    vez. Medido en una 5080: unos 0,1 GB de pico por segundo de audio, asi que un
+    fichero de diez minutos pedia ~60 GB y la tarjeta se iba a memoria compartida
+    -- si es que no reventaba antes. Troceado, el pico deja de depender de lo que
+    dure el fichero.
+
+    WHY CHUNK. encode_audio_latent() sends whatever it is given to the GPU in one
+    go: measured at ~0.1 GB of peak per second of audio, so a ten-minute file
+    asked for ~60 GB. Chunked, the peak stops depending on the file's length.
+    """
+    trozos = []
+    for i in range(0, pcm.shape[1], MUESTRAS_TROZO_AUDIO):
+        parte = pcm[:, i:i + MUESTRAS_TROZO_AUDIO]
+        if parte.shape[1] < 800:          # menos de un hop: no da ni un latente
+            break
+        z = P.encode_audio_latent(vae, parte)          # [1, 32, 2t] canal-mayor
+        if z.ndim != 3 or z.shape[1] != 32 or z.shape[2] % 2:
+            return None
+        t = z.shape[2] // 2
+        trozos.append(z.reshape(1, 32, 2, t).float())
+    return torch.cat(trozos, dim=-1) if trozos else None
+
+
+def extraer_audio(fuentes, audio_vae, max_tokens=1024, log=print):
     """Latente [1, 32, 2, T] a partir de las fuentes con pista de audio.
 
-    Las referencias se concatenan en el tiempo y se recorta al presupuesto. Se
-    recorta por el FINAL y no se remuestrea: un latente de audio remuestreado no
-    suena mas corto, suena mal.
+    Se recorta ANTES de codificar, no despues. Parece un detalle y no lo es: la
+    version anterior codificaba el fichero entero y luego se quedaba con los
+    primeros T latentes, asi que con un tope de 1.024 tokens -- 12,8 segundos --
+    un mp3 de diez minutos pasaba entero por la GPU para tirar el 98%.
 
-    [1, 32, 2, T] from whichever sources carry audio. References are
-    concatenated in time and cut to budget from the END rather than resampled:
-    a resampled audio latent does not sound shorter, it sounds wrong.
+    Trimmed BEFORE encoding, not after. The previous version encoded the whole
+    file and then kept the first T latents, so with a 1,024 token budget -- 12.8
+    seconds -- a ten-minute mp3 went through the GPU in full to throw away 98%.
     """
     P = precache()
-    trozos = []
-    usados = []
+    trozos, usados = [], []
     tope_latentes = max(1, max_tokens // 2) if max_tokens else None
 
     for ruta in fuentes:
+        if tope_latentes and sum(x.shape[-1] for x in trozos) >= tope_latentes:
+            break
         ext = os.path.splitext(ruta)[1].lower()
         if ext not in AUDIO_EXTS + VIDEO_EXTS:
             continue
@@ -313,30 +353,23 @@ def extraer_audio(fuentes, audio_vae, max_tokens=400, log=print):
             dur = P.audio_duration(ruta)
             if not dur or dur <= 0:
                 continue
-            # read_audio_pcm pide el audio en fotogramas de video a 24 fps: se
-            # le pasa la duracion real del fichero, no una geometria de
-            # entrenamiento, porque aqui no hay clip que sincronizar.
-            # read_audio_pcm asks for audio in 24 fps video frames: the file's
-            # real duration is passed, not a training geometry -- there is no
-            # clip to stay in sync with here.
+            if tope_latentes:
+                # Lo que falta para llenar el presupuesto, a 40 latentes/s, con
+                # un segundo de margen para no quedarse corto por redondeo.
+                # What is left to fill the budget at 40 latents/s, plus a second
+                # of margin so rounding cannot fall short.
+                falta = tope_latentes - sum(x.shape[-1] for x in trozos)
+                dur = min(dur, falta / 40.0 + 1.0)
             frames = max(1, int(round(dur * 24.0)))
             pcm = P.read_audio_pcm(ruta, frames, 24.0)
             if pcm is None or pcm.size == 0:
                 continue
-            z = P.encode_audio_latent(audio_vae, pcm)     # [1, 32, 2T]
-            if z.ndim != 3 or z.shape[1] != 32 or z.shape[2] % 2:
-                log("[REFMOD] {}: latente inesperado {}, se salta"
-                    .format(os.path.basename(ruta), tuple(z.shape)))
+            z = _encode_audio_troceado(P, audio_vae, pcm)
+            if z is None:
+                log("[REFMOD] {}: no se pudo codificar, se salta".format(os.path.basename(ruta)))
                 continue
-            t = z.shape[2] // 2
-            # [1,32,2T] canal-mayor -> [1,32,2,T]. El orden coincide: las
-            # primeras T posiciones son el canal izquierdo.
-            # Channel-major [1,32,2T] -> [1,32,2,T]; the first T positions are
-            # the left channel, which is what the node expects.
-            trozos.append(z.reshape(1, 32, 2, t).float())
-            usados.append("{} ({:.2f}s)".format(os.path.basename(ruta), t / 40.0))
-            if tope_latentes and sum(x.shape[-1] for x in trozos) >= tope_latentes:
-                break
+            trozos.append(z)
+            usados.append("{} ({:.2f}s)".format(os.path.basename(ruta), z.shape[-1] / 40.0))
         except Exception as exc:
             log("[REFMOD] {}: {}".format(os.path.basename(ruta), exc))
 
@@ -345,8 +378,10 @@ def extraer_audio(fuentes, audio_vae, max_tokens=400, log=print):
 
     latente = torch.cat(trozos, dim=-1)
     if tope_latentes and latente.shape[-1] > tope_latentes:
-        log("[REFMOD] audio: {} latentes -> {} por el presupuesto de {} tokens"
-            .format(latente.shape[-1], tope_latentes, max_tokens))
+        # Se recorta por el FINAL y no se remuestrea: un latente de audio
+        # remuestreado no suena mas corto, suena mal.
+        # Cut from the END rather than resampled: a resampled audio latent does
+        # not sound shorter, it sounds wrong.
         latente = latente[..., :tope_latentes].clone()
     return latente.to(torch.float16), usados
 
