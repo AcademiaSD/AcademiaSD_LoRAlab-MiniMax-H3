@@ -707,10 +707,19 @@ Any valid grid value works, including ones below the 124 the tooltip calls the
 trained floor: 107 frames (4.46 s) ran clean. The grid is what matters, not the
 size.
 
-> **It is not deterministic.** Every so often a subject is duplicated -- both
-> faces come out as the same person -- or a reference is ignored. It is the
-> exception rather than the rule, but check the preview before committing to a
-> long render. Audio-only and visual-only pairs were not tested.
+> **It is not deterministic, and "reliable" above is not a guarantee.** Every so
+> often a subject is duplicated -- both faces come out as the same person -- or a
+> reference is ignored, and **audio can still come out with artefacts**:
+> mispronunciations, a stray word, a voice that wavers. It is the exception
+> rather than the rule, but it happens, so check the preview before committing to
+> a long render.
+>
+> Read that table as what held up in testing, not as a promise about every
+> configuration. It was measured in one workflow -- AcademiaSD's -- with one set
+> of references and a handful of consecutive runs per case, where the results
+> were consistently good. Different references, resolutions, step counts or
+> partitions have not been swept. Audio-only and visual-only pairs were not
+> tested at all.
 
 **Voice transfer works, and across identities.** One subject's voice reference
 applied cleanly to another subject's face. The node's README lists speaker
