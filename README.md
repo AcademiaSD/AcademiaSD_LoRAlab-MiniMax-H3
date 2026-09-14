@@ -737,6 +737,9 @@ a stray `.mp3` is ignored by the visual pass and the images by the audio one.
 Output goes straight to `models/refmods`. There is no export step because there
 is nothing to convert: the file the encoder writes **is** the file ComfyUI loads.
 
+**Keep the visual and the audio as separate files.** That is the recommended
+layout, and for now the only one that buys anything.
+
 **Bundle** writes one `.safetensors` holding both references instead of
 `name_visual` and `name_audio`. It is a container, not a fusion: each reference
 keeps its own tensor and metadata and the loader expands them into independent
@@ -745,6 +748,26 @@ whatever the name suggests — the format's own spec opens by saying it *"does n
 concatenate audio with visual latents or change H3 conditioning semantics"*. Off
 by default, because a bundle needs ComfyUI-MiniMaxH3Mod 0.2.6 or newer while the
 separate files are read by every version.
+
+**Why one file cannot weld a voice to a face.** H3 does have a block for it,
+`video_audio`, where sound and picture share one temporal origin, and ComfyUI's
+core supports it on the reference path — `model_base.py` collects `audio_latent`
+from refs and the DiT handles `kind in ("video", "video_audio")`. The mod loader
+is what refuses to emit it: `ref_block()` hardcodes `ref_audio_t: 0` and
+`audio_latent: None` for every visual mod, with no `video_audio` branch. So no
+packaging choice on this side changes anything.
+
+Even if that branch existed, this extractor's output would not suit it.
+`video_audio` asserts that frame *n* goes with instant *n* of the audio, while
+identity extraction deliberately spreads frames across the whole clip so the mod
+does not learn one particular take. Pairing scattered stills with a continuous
+track would claim a temporal correspondence that is not there. A contiguous clip
+encoded as a clip would be needed — the 31.9 GB/Mpx path this extractor avoids.
+
+If you want a voice genuinely welded to a face today, the **native node already
+does it**, no new code: `ref_videos.ref_video_N` paired by index with
+`ref_video_audios.ref_video_audio_N`. Remember those share numbering with your
+RefMods, so adding one shifts every `<Subject N>` after it.
 
 ### You do not need the whole model
 
