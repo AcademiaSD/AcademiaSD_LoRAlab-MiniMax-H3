@@ -582,6 +582,26 @@ a side-of-frame rule seemed to be emerging, and it cost about thirteen
 generations. There is no such rule. If voices appear to follow screen position,
 the references are misconfigured and that is where to look.
 
+**In a multi-shot prompt, put every character in the first shot.** A RefMod has
+no temporal scope. It is appended to `minimax_refs` and attended to across the
+whole sequence, with no field tying it to a range of frames -- compare keyframes,
+which carry a `resolved_frame_index`. So when a prompt cuts between shots with
+one person in each, nothing tells the model who belongs to which stretch: both
+identities are live in every frame and the stronger reference simply wins
+everywhere. A four-shot sketch alternating two characters came out with the same
+face in all four.
+
+Opening on a two-shot that establishes everyone fixes it. Both identities land
+before the first cut, and the later single-person shots keep the right face.
+Describe recurring wardrobe the same way in every shot too -- it gives the model
+something to hold onto across a cut.
+
+If a shot still drifts, `MiniMaxH3AddGuide` is the only thing here with real
+temporal control: it anchors an image or a clip at a given `frame_idx`, chains
+for several anchors, and rides in `minimax_keyframes` so it does not disturb
+RefMod numbering. Failing that, render each shot as its own clip -- one subject
+and one voice per clip removes every pairing problem on this page at once.
+
 **Either every subject has a voice, or none does.** One audio reference for two
 faces is the single worst thing you can do: the orphan voice gets attached
 somewhere, and from then on nothing in the prompt behaves. Roughly thirteen
