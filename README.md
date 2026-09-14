@@ -574,13 +574,33 @@ generations of this looked like a conspiracy of side-of-frame, subject numbering
 and slot order rules, none of which turned out to exist. With no audio at all the
 model simply invents a voice, which is a perfectly good control.
 
-**Write `<Subject 1>` and `<Subject 2>` in the prompt. Do not give them names.**
-A real name the model knows brings its own prior, which competes with your
-reference and wins -- writing `arnoldschwarzenegger` once produced *two* of him,
-one of them painted over the other subject's reference. An invented name avoids
-the prior but the model tries to *pronounce* it: `4c4d3m14SD` came out being
-spelled aloud before the dialogue. Referring to the subject tags directly has
-neither problem.
+**Bind the names, or use no names at all.** Writing a bare name in the prompt
+goes wrong in both directions: a real one the model knows brings its own prior,
+which competes with your reference and wins -- `arnoldschwarzenegger` once
+produced *two* of him, one painted over the other subject's reference -- while an
+invented one dodges the prior but gets *pronounced*, and `4c4d3m14SD` came out
+being spelled aloud before the dialogue.
+
+Two forms avoid both. Declaring the binding explicitly is the better one, since
+it lets the rest of the prompt read naturally, and it is what other users report
+using:
+
+```
+@ref_image_1 as Ana, realistic person, natural human appearance.
+@ref_image_2 as Marco, realistic person, natural human appearance.
+@ref_audio_1 as Ana voice.
+@ref_audio_2 as Marco voice.
+```
+
+Referring to `<Subject 1>` and `<Subject 2>` directly, with no names anywhere,
+works too and is shown in the example below.
+
+Note that the exact spelling matters more than it should. `@ref_video1` -- no
+underscore, and "video" rather than "image" -- broke the voice pairing across two
+seeds, even though both mods here are `kind: video`. None of these strings is a
+token: H3's tokenizer knows `<d>`, `</d>`, `<|cutoff|>`, `<|lyrics_start|>` and a
+few others, and everything else is read as ordinary language. Which of the two
+differences did the damage was not isolated.
 
 With those in place the prompt is finally in charge: who stands where, and who
 speaks, come out as written.
@@ -610,6 +630,16 @@ N/A
 inside it. `<Subject n>`, `(S1)` and `<Picture n>` are ordinary text on this path:
 `Apply` injects the latents *after* the prompt is tokenised, so no positional
 label is ever emitted for a RefMod. They work as writing, not as tokens.
+
+**Keep the voice sample short and unremarkable.** An audio reference carries
+what was *said*, not only how it sounded: a 20 second sample produced the model
+speaking a word from the sample before the intended line, in its own default
+voice rather than the reference's. Five seconds is enough for timbre -- 400
+tokens -- and the fewer distinctive words, proper nouns and brand names in there,
+the less there is to leak. If you hear something you did not write, in a voice
+you do not recognise, look at what is inside the reference rather than at the
+prompt. More than one audio reference also makes pronunciation artefacts more
+likely.
 
 > **It is not deterministic.** Every so often a subject is duplicated -- both
 > faces come out as the same person -- or a reference is ignored, and the voices
