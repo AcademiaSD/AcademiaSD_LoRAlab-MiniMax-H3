@@ -366,7 +366,8 @@ def extraer_audio(fuentes, audio_vae, max_tokens=1024, log=print):
                 continue
             z = _encode_audio_troceado(P, audio_vae, pcm)
             if z is None:
-                log("[REFMOD] {}: no se pudo codificar, se salta".format(os.path.basename(ruta)))
+                log("[REFMOD] {}: could not encode, skipped / no se pudo codificar, "
+                    "se salta".format(os.path.basename(ruta)))
                 continue
             trozos.append(z)
             usados.append("{} ({:.2f}s)".format(os.path.basename(ruta), z.shape[-1] / 40.0))
@@ -460,9 +461,10 @@ def extraer_visual(fuentes, video_vae, resolution=1024, max_tokens=1024, log=pri
     if por_frame <= 0:
         raise ValueError("Lienzo invalido {}x{}".format(ancho, alto))
     tope_t = max(1, max_tokens // por_frame) if max_tokens else None
-    log("[REFMOD] lienzo {}x{} px = {} tokens por fotograma latente{}"
+    log("[REFMOD] canvas {}x{} px = {} tokens per latent frame{} / lienzo, "
+        "tokens por fotograma latente"
         .format(ancho, alto, por_frame,
-                "; caben {}".format(tope_t) if tope_t else ""))
+                "; {} fit / caben".format(tope_t) if tope_t else ""))
 
     trozos, usados = [], []
     for ruta in visuales:
@@ -491,8 +493,9 @@ def extraer_visual(fuentes, video_vae, resolution=1024, max_tokens=1024, log=pri
                     objetivo = P.h3_pixel_frames(max(2, tope_t - puestos))
                 pedidos = P.h3_valid_frames(disponible, objetivo)
                 if not pedidos:
-                    log("[REFMOD] {}: solo {} fotogramas, por debajo del minimo "
-                        "de 5 de la rejilla 17n+5; se salta".format(nombre, disponible))
+                    log("[REFMOD] {}: only {} frames, below the 17n+5 grid's floor of 5; "
+                        "skipped / solo {} fotogramas, por debajo del minimo de 5"
+                        .format(nombre, disponible, disponible))
                     continue
                 frames = P.read_video_frames(ruta, pedidos, ancho, alto)
                 z = P.encode_clip_latent(video_vae, frames).float()     # [1,24,T,h,w]
@@ -515,7 +518,8 @@ def extraer_visual(fuentes, video_vae, resolution=1024, max_tokens=1024, log=pri
         # Uniformly resampled rather than cut from the end: in vision the last
         # frames carry as much as the first, unlike audio.
         idx = torch.linspace(0, latente.shape[2] - 1, tope_t).round().long()
-        log("[REFMOD] visual: {} fotogramas latentes -> {} por el presupuesto de {} tokens"
+        log("[REFMOD] visual: {} latent frames -> {} to fit the {} token budget "
+            "/ fotogramas latentes -> N por el presupuesto"
             .format(latente.shape[2], tope_t, max_tokens))
         latente = latente[:, :, idx].clone()
     return latente.to(torch.float16), usados

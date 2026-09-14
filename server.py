@@ -1537,8 +1537,10 @@ def extract_refmod():
         empaquetar = bool(data.get("bundle", False))
         descripcion = str(data.get("description", "")).strip()
 
-        log_tarea("[REFMOD] {} fichero(s) en {}".format(len(fuentes), carpeta))
-        log_tarea("[REFMOD] modo encode | tipo {} | salida {}".format(concepto, destino))
+        log_tarea("[REFMOD] {} file(s) in {} / fichero(s) en"
+                  .format(len(fuentes), carpeta))
+        log_tarea("[REFMOD] encode mode | type {} | output {} / modo encode, tipo, salida"
+                  .format(concepto, destino))
 
         P = refmod.precache()
 
@@ -1560,12 +1562,14 @@ def extract_refmod():
                 log_tarea("[REFMOD] cargando el VAE de audio / loading the audio VAE...")
                 avae = P.load_h3_audio_vae(P.NF4_MODEL_ID) if hay_audio else None
                 if avae is None:
-                    detalles.append("audio: falta el VAE de audio y no se pudo descargar")
+                    detalles.append("audio: the audio VAE is missing and could not be "
+                                    "downloaded / falta el VAE de audio")
                 else:
                     lat, usados = refmod.extraer_audio(fuentes, avae, tok_a, log=log_tarea)
                     del avae
                     if lat is None:
-                        detalles.append("audio: ninguna fuente traia pista de audio")
+                        detalles.append("audio: no source carried an audio track "
+                                    "/ ninguna fuente traia pista de audio")
                     else:
                         piezas.append((lat, "audio", dict(
                             name=nombre + "_audio", source="audio",
@@ -1575,7 +1579,8 @@ def extract_refmod():
 
             if kind in ("visual", "both"):
                 if not hay_video:
-                    detalles.append("visual: falta el VAE de video y no se pudo descargar")
+                    detalles.append("visual: the video VAE is missing and could not be "
+                                    "downloaded / falta el VAE de video")
                     raise RuntimeError("El VAE de video no esta disponible. / "
                                        "The video VAE is not available.")
                 log_tarea("[REFMOD] cargando el VAE de video / loading the video VAE...")
@@ -1584,7 +1589,8 @@ def extract_refmod():
                 lat, usados = refmod.extraer_visual(fuentes, vvae, res, tok_v, log=log_tarea)
                 del vvae
                 if lat is None:
-                    detalles.append("visual: ninguna fuente era imagen o video")
+                    detalles.append("visual: no source was an image or a video "
+                                    "/ ninguna fuente era imagen o video")
                 else:
                     tipo = "image" if int(lat.shape[2]) == 1 else "video"
                     piezas.append((lat, tipo, dict(
@@ -1623,7 +1629,8 @@ def extract_refmod():
                                 .format(kw["name"], tipo, refmod.token_count(lat, tipo)))
         else:
             if empaquetar:
-                detalles.append("bundle omitido: hace falta mas de una referencia")
+                detalles.append("bundle skipped: more than one reference is needed "
+                                "/ bundle omitido, hace falta mas de una referencia")
             for lat, tipo, kw in piezas:
                 ruta = refmod.guardar(lat, tipo, kw["name"],
                                       str(destino / kw["name"]),
