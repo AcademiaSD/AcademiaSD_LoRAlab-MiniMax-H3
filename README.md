@@ -657,12 +657,14 @@ and the failure mode changes as it does:
 | two visuals + one audio | can get the assignment wrong |
 | two visuals + two audios | voices from the encoding can surface and cross between characters |
 
-The worst case is worth recognising when you hear it: the clip opens with a voice
-that belongs to neither subject saying something incoherent, pauses, and then
-delivers the requested line in the right voice. Measured on one such clip, the
-first stretch runs at an F0 of 157 Hz and the second at 84 Hz, separated by a
-0.6 s silence -- nearly an octave apart, so two distinct voices rather than one
-modulating.
+The worst case is worth recognising when you hear it. The clip opens in the
+*other* subject's voice saying something incoherent, pauses, and then delivers
+the requested line correctly in the voice that should have said it all along --
+both voices coming out of the same mouth, one after the other. Measured on one
+such clip, the first stretch runs at an F0 of 157 Hz and the second at 84 Hz,
+separated by a 0.6 s silence: nearly an octave apart, so two distinct voices
+rather than one modulating. Nothing is wrong with the references when this
+happens; the model simply had two encoded voices available and used both.
 
 > **It is not deterministic.** Every so often a subject is duplicated -- both
 > faces come out as the same person -- or a reference is ignored, and the voices
