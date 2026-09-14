@@ -926,9 +926,17 @@
 
                     <div id="refmod_estimate" style="font-size:0.78rem; color:#94a3b8; padding:2px 2px 8px;"></div>
 
-                    <button type="button" class="btn btn-primary" onclick="createRefmod()">
-                        Create RefMod / Crear RefMod
-                    </button>
+                    <div class="btn-row">
+                        <button type="button" class="btn btn-secondary btn-tall" onclick="saveRefmodSettings()"
+                                title="Stores every field in this panel in refmod_settings.json, so the next launch comes back exactly here -- the output folder above all, which is the one nobody wants to retype. / Guarda todos los campos de este panel en refmod_settings.json, para que el proximo arranque vuelva exactamente aqui: sobre todo la carpeta de salida, que es la que nadie quiere reescribir.">
+                            <span class="main-text">Save JSON</span>
+                            <span class="sub-text">Guardar JSON</span>
+                        </button>
+                        <button type="button" class="btn btn-success btn-tall" onclick="createRefmod()">
+                            <span class="main-text">Create RefMod</span>
+                            <span class="sub-text">Crear RefMod</span>
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1723,6 +1731,7 @@
                 }
                 updateProjectPaths();
                 refmodDefaults();
+                aplicarRefmodGuardado(data.refmod);
                 loadDatasetInfo();
                 loadCaptionSettings();
             } catch (e) {}
@@ -2547,6 +2556,60 @@
             pon('refmod_source', ds);
             pon('refmod_name', proj ? proj + '_refmod.safetensors' : '');
             pon('refmod_output', refmodOutputSugerido());
+            refmodEstimate();
+        }
+
+        // Los campos del panel, en un solo sitio: los recorre tanto el guardado
+        // como la restauracion, asi que no pueden desincronizarse.
+        // The panel's fields in one place, walked by both save and restore, so
+        // the two cannot drift apart.
+        const REFMOD_CAMPOS = ['refmod_source', 'refmod_name', 'refmod_output',
+                               'refmod_kind', 'refmod_concept', 'refmod_tokens_audio',
+                               'refmod_tokens_visual', 'refmod_resolution',
+                               'refmod_description'];
+
+        async function saveRefmodSettings() {
+            const datos = {};
+            REFMOD_CAMPOS.forEach(function (id) {
+                const el = document.getElementById(id);
+                if (el) datos[id] = el.value;
+            });
+            const bundle = document.getElementById('refmod_bundle');
+            if (bundle) datos.refmod_bundle = bundle.checked;
+            try {
+                const res = await fetch('/api/save-refmod', { method: 'POST', body: JSON.stringify(datos) });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    alert('RefMod settings saved / Configuracion RefMod guardada: ' + data.file);
+                } else {
+                    alert('Error: ' + (data.error || 'unknown'));
+                }
+            } catch (e) {
+                alert('Error: ' + e);
+            }
+        }
+
+        // Se llama DESPUES de refmodDefaults(), porque lo guardado es una eleccion
+        // explicita y gana al automatismo. Ademas anota cada valor en refmodAuto:
+        // sin eso, refmodDefaults lo leeria como escrito a mano y nunca volveria
+        // a seguir al dataset al cambiar de proyecto.
+        // Called AFTER refmodDefaults(), since a saved value is an explicit choice
+        // and outranks the automation. It also records each value in refmodAuto:
+        // without that, refmodDefaults would read it as hand-typed and would never
+        // follow the dataset again on a project change.
+        function aplicarRefmodGuardado(r) {
+            if (!r) return;
+            REFMOD_CAMPOS.forEach(function (id) {
+                if (r[id] === undefined || r[id] === '') return;
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.value = r[id];
+                refmodAuto[id] = r[id];
+            });
+            if (r.refmod_bundle !== undefined) {
+                const bundle = document.getElementById('refmod_bundle');
+                if (bundle) bundle.checked = !!r.refmod_bundle;
+            }
             refmodEstimate();
         }
 

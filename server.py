@@ -64,6 +64,7 @@ ASSETS_DIR = BASE_DIR / "assets"
 UI_FILE = BASE_DIR / "trainer_ui.html"
 LOGO_FILE = ASSETS_DIR / "logo.png" if (ASSETS_DIR / "logo.png").exists() else BASE_DIR / "logo.png"
 PRECACHE_CONFIG = BASE_DIR / "pre_cache_settings.json"
+REFMOD_CONFIG = BASE_DIR / "refmod_settings.json"
 TRAIN_CONFIG = BASE_DIR / "train_settings.json"
 HF_TOKEN_CONFIG = BASE_DIR / "HF_token.json"
 CAPTION_SCRIPT = BASE_DIR / "0_caption_MiniMaxH3.py"
@@ -460,6 +461,7 @@ def get_settings():
     return jsonify({
         "pre_cache": read_json_file(PRECACHE_CONFIG, {}),
         "train": read_json_file(TRAIN_CONFIG, {}),
+        "refmod": read_json_file(REFMOD_CONFIG, {}),
         "base_dir": str(BASE_DIR)
     })
 
@@ -493,6 +495,28 @@ def save_precache():
             train_cfg["trigger_word"] = data["trigger_word"]
         write_json_file(TRAIN_CONFIG, train_cfg)
         return jsonify({"status": "ok", "file": saved_files[0], "all_saved": saved_files})
+    except Exception as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/api/save-refmod", methods=["POST"])
+def save_refmod():
+    """Guarda el panel RefMod tal cual. / Stores the RefMod panel as-is.
+
+    Sin la cocina de save_precache -- aqui no hay rutas derivadas del nombre de
+    proyecto ni nada que sincronizar con train_settings: el panel RefMod es
+    independiente y se guarda entero, incluida la carpeta de salida, que es lo
+    que costaba volver a escribir en cada arranque.
+    No derived paths and nothing to sync into train_settings: the RefMod panel
+    stands on its own and is stored whole, output folder included, which is the
+    part that was tedious to retype on every launch.
+    """
+    try:
+        data = request.get_json(force=True)
+        if not isinstance(data, dict):
+            return jsonify({"status": "error", "error": "JSON object required / Objeto JSON requerido."}), 400
+        write_json_file(REFMOD_CONFIG, data)
+        return jsonify({"status": "ok", "file": REFMOD_CONFIG.name})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
 
