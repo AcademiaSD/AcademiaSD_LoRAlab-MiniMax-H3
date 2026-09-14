@@ -582,8 +582,11 @@ invented one dodges the prior but gets *pronounced*, and `4c4d3m14SD` came out
 being spelled aloud before the dialogue.
 
 Two forms avoid both. Declaring the binding explicitly is the better one, since
-it lets the rest of the prompt read naturally, and it is what other users report
-using:
+it lets the rest of the prompt read naturally. The convention is not invented:
+`ref_image_1`, `ref_video_1` and `ref_audio_1` are the names of the native
+reference inputs, and MiniMax understands them because they are its own. Users
+apply it in the NATIVE reference workflow; that it carries over to RefMods, which
+reach the model by a different path, is what was verified here.
 
 ```
 @ref_image_1 as Ana, realistic person, natural human appearance.
@@ -595,12 +598,14 @@ using:
 Referring to `<Subject 1>` and `<Subject 2>` directly, with no names anywhere,
 works too and is shown in the example below.
 
-Note that the exact spelling matters more than it should. `@ref_video1` -- no
-underscore, and "video" rather than "image" -- broke the voice pairing across two
-seeds, even though both mods here are `kind: video`. None of these strings is a
-token: H3's tokenizer knows `<d>`, `</d>`, `<|cutoff|>`, `<|lyrics_start|>` and a
-few others, and everything else is read as ordinary language. Which of the two
-differences did the damage was not isolated.
+Spell it exactly. `@ref_video1` -- no underscore -- broke the voice pairing
+across two seeds and had the model speak a stray word in its default voice.
+`ref_video_1` is a perfectly good native input name, so the missing underscore is
+the likely culprit rather than the word, though that was not isolated. None of
+these strings is a token either way: H3 knows `<d>`, `</d>`, `<|cutoff|>`,
+`<|lyrics_start|>` and a few more, and reads everything else as language -- which
+is exactly why a string it half-recognises can do something and a malformed one
+can do something else.
 
 With those in place the prompt is finally in charge: who stands where, and who
 speaks, come out as written.
