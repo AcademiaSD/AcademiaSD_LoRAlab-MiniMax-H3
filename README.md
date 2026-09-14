@@ -579,6 +579,25 @@ afterwards would inject them twice. Three things to know about it:
   it renumbers everything after it.
 * Connect its `reference_map` output to a text node and it tells you the actual
   assignment, rather than counting slots by hand.
+* Set **`reference_fps` to 2** for mods built from stacked stills. The node
+  samples visual references at 2 fps for Qwen, so at the default 24 a 22-frame
+  identity mod shows the text encoder only two or three of its views — precisely
+  when you are asking it to tell two characters apart.
+
+**Confirmed working, on Ref2VA.** Two identity mods from the published corpus,
+loaded in slots 1 and 2 and addressed as `<Video 1>` and `<Video 2>`, produced
+the right character in the right place. `<Video n>` rather than `<Picture n>`
+because a mod built from many stills has more than one latent frame, which makes
+its kind `video`; the `reference_map` output settles it either way. Audio came
+out correct **without being referenced at all** — a voice does not compete with
+anything, so it needs no label; what needed arbitration was the two faces.
+
+One caveat from that run: with several references loaded you may need **more
+sampling steps, even with a turbo LoRA**. A turbo LoRA is distilled to land in
+few steps on the model's base distribution, and two identity mods add some 11,000
+tokens for the DiT to reconcile at every step. That is a plausible reading of one
+observation, not a measurement — but if two characters come out muddy, raise the
+steps before concluding the references failed.
 
 Keep one concept per file. Stacking two characters inside a single mod gives you
 one latent with no way to separate them again; two files can at least be numbered.
