@@ -646,6 +646,24 @@ you do not recognise, look at what is inside the reference rather than at the
 prompt. More than one audio reference also makes pronunciation artefacts more
 likely.
 
+**How far you can push it.** Reliability degrades with the number of references,
+and the failure mode changes as it does:
+
+| Layout | Behaviour |
+| :--- | :--- |
+| one visual | reliable |
+| one visual + one audio | reliable |
+| two visuals | reliable |
+| two visuals + one audio | can get the assignment wrong |
+| two visuals + two audios | voices from the encoding can surface and cross between characters |
+
+The worst case is worth recognising when you hear it: the clip opens with a voice
+that belongs to neither subject saying something incoherent, pauses, and then
+delivers the requested line in the right voice. Measured on one such clip, the
+first stretch runs at an F0 of 157 Hz and the second at 84 Hz, separated by a
+0.6 s silence -- nearly an octave apart, so two distinct voices rather than one
+modulating.
+
 > **It is not deterministic.** Every so often a subject is duplicated -- both
 > faces come out as the same person -- or a reference is ignored, and the voices
 > can swap. It is the exception rather than the rule, but check the preview
